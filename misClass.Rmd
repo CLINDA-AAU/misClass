@@ -1,0 +1,633 @@
+---
+title: Regression modelling based on imperfect labels arising from unsupervised learning
+  by Gaussian mixture models
+author: "Rasmus Brøndum & Martin Bøgsted"
+date: "11 2 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages from CRAN
+library(knitr, quietly = T)
+library(dplyr, quietly = T)
+library(mclust, quietly = T)
+library(mixtools, quietly = T)
+library(simex, quietly = T)
+library(prodlim, quietly = T)
+library(survival, quietly = T)
+library(arrangements, quietly = T)
+library(foreach)
+library(doParallel)
+
+# Packages from Bioconductor
+library(Biobase)
+library(GEOquery)
+```
+
+Auxillary functions
+```{r auxillary functions, include = FALSE, echo = FALSE}
+
+# The k-means function does not come with a predict method in its name space
+# you have to build your own. A suggestion called predict.keans is given 
+# at the home page
+#
+# https://stats.stackexchange.com/questions/12623/predicting-cluster-of-a-new-object-with-kmeans-in-r
+#
+predict.kmeans <- function(object,
+                           newdata,
+                           method = c("centers", "classes")) {
+  method <- match.arg(method)
+  
+  centers <- object$centers
+  ss_by_center <- apply(centers, 1, function(x) {
+    colSums((t(newdata) - x) ^ 2)
+  })
+  best_clusters <- apply(ss_by_center, 1, which.min)
+  
+  if (method == "centers") {
+    centers[best_clusters, ]
+  } else {
+    best_clusters
+  }
+}
+
+# Reordering a confusion matrix to optimize accuracy
+opt <- function(x){
+  acc <- function(x)
+  {
+    sum(diag(x))/sum(x)
+  }
+  pe <- permutations(7,7)
+  curr.x <- acc(x)
+  curr.i <- 1:7
+  for(i in 1:nrow(pe)){
+    if(acc(x[pe[i,],])>curr.x){ 
+      curr.i = pe[i,]
+      curr.x <- acc(x[pe[i,],])
+    }
+  }
+  curr.i
+}
+
+# Function to estimate the misclassification matrix from a Gaussian mixture model
+# fitted by Mclust by Monte Carlo integration.
+Pi <- function(fit){
+  cl  <- unique(fit$classification)
+  n.cl <- length(cl)
+  hatPi <- matrix(0, n.cl, n.cl)
+  for(j in cl){
+    x <- rmvnorm(100000, fit$parameters$mean[,j], fit$parameters$variance$sigma[ , , j])
+    p.x <- predict(fit,x)$classification
+    for(i in cl){
+      hatPi[i,j] <- mean(p.x == i)
+    }
+  }  
+  hatPi
+}
+
+
+# Function to "indicate" if observed endpoints of intevals cover the right value,
+# i.e. a component in coverage calculations.
+ind <- function(x){
+  res <- c(0,0,0)
+  if (x[1] >= x[2] & x[1] <= x[3]) 
+    res[1] <- 1
+  else 
+    res[1] <- 0
+  if (x[1] >= x[4] & x[1] <= x[5]) 
+    res[2] <- 1
+  else 
+    res[2] <- 0
+  if (x[1] >= x[6] & x[1] <= x[7]) 
+    res[3] <- 1
+  else 
+    res[3] <- 0
+  return(res)
+}
+
+# Function for simulating survival data.
+my.sim <- function(n){
+  X1 <- rbinom(n, size = 1, p = 0.5) 
+  X2 <- 2*rbinom(n, size = 1, p = 0.3) + X1
+  X2 <- case_when(X2 == 0 ~ 0,
+            X2 == 1 ~ 1,
+            X2 == 2 ~ 1,
+            X2 == 3 ~ 0)
+  eventtime <- rexp(n, (X1+1))
+  censtime <- rexp(n, 0.5)
+  time <- pmin(eventtime, censtime)
+  status <- eventtime < censtime
+  event <- status
+  X1  <- factor(X1)
+  X2  <- factor(X2)
+  data.frame(eventtime = eventtime, censtime = censtime, time = time, event = event,
+             X1 = X1, X2 = X2,status = status)
+}
+
+## Function for binomial simulations
+simBinom <- function(pi0 = 5/10,      # Probability of 1. component
+                     mu0 = c(-1, 0),  # Mean parameter of feature 1
+                     mu1 = c(1, 0),   # Mean parameter of feature 2
+                     alpha = -1,      # 
+                     beta = 2,        #
+                     n = 1000,        # Number of samples
+                     method = "GMM"){ # Method for clustering GMM or Kmeans
+  
+  # Probability of 2. component
+  pi1 = 1 - pi0 
+  
+  # Results container
+  results <- rep(NA,12)
+  names(results) <- c("true.a", "true.a.std", "true.b", "true.b.std",
+                      "naive.a", "naive.a.std", "naive.b", "naive.b.std",
+                      "mcsimex.a", "mcsimex.a.std", "mcsimex.b", "mcsimex.b.std")
+  
+  # Training data, classes and features
+  class <- factor(sort(rbinom(n, size = 1, prob = pi1)+1))
+  feature <- rbind(rmvnorm(sum(class == 1), mu0),
+                   rmvnorm(sum(class == 2), mu1))
+  
+  # Outcome linearly regressed to class
+  outcome   <- rbinom(n, size = 1, 
+                      p = exp(alpha + 
+                                (beta)*(class==2))/(1+exp(alpha + (beta)*(class==2))))
+  
+  # Dataframe containing training data
+  train <- data.frame(id = 1:n, class = class, feature = feature, 
+                      outcome = outcome)
+  if(method == "GMM"){
+    # Fit Gaussian mixture model with two components
+    fit <- Mclust(train[,c("feature.1", "feature.2")], G = 2)
+    
+    # Classfication of training data
+    pred <- predict(fit)
+    reord <- order(fit$parameters$mean[1,])
+    train$predicted <- factor(pred$classification)
+    train$predicted <- relevel(factor(train$predicted, label = reord), "1")
+  }
+  
+  if(method == "Kmeans"){
+    # Fit K.means with two clusters
+    fit <- kmeans(train[,c("feature.1", "feature.2")], 2)
+    
+    # Classification of training data
+    pred <- predict.kmeans(fit, newdata = train[,c("feature.1", "feature.2")],
+                           method = "classes")
+    reord <- order(fit$centers[,1])
+    train$predicted <- factor(pred)
+    train$predicted <- relevel(factor(train$predicted, label = reord), "1")
+  }
+  
+  ## Check if predicted classes has two levels, if not return NA results
+  if(length(unique(train$predicted)) == 2){
+    res <- table(train$predicted, train$class)
+    
+    err <- 1-sum(diag(res))/sum(res)
+    
+    hatPi <- Pi(fit)
+    
+    dimnames(hatPi) <- list(levels(train$predicted), levels(train$class))
+    
+    true <- glm(outcome ~ class, data = train, family = binomial, x = T, y = T)
+    results[c("true.a","true.b")] <- coefficients(true)
+    results[c("true.a.std","true.b.std")] <- sqrt(diag(vcov(true)))
+    
+    naive <- glm(outcome ~ predicted, data = train, family = binomial, x = T, y =T)
+    results[c("naive.a","naive.b")] <- coefficients(naive)
+    results[c("naive.a.std","naive.b.std")] <- sqrt(diag(vcov(naive)))
+    
+    # Simex
+    fit.class <- mcsimex(naive, mc.matrix = hatPi, SIMEXvariable = "predicted")
+    results[c("mcsimex.a","mcsimex.b")] <- coefficients(fit.class)
+    results[c("mcsimex.a.std","mcsimex.b.std")] <- sqrt(diag(fit.class$variance.asymptotic))
+  }
+  return(results)
+}
+
+## Function to summarize results from binomial simulations
+summariseResults <- function(results, alpha, beta){
+  ## Bias
+  bias.a <- colMeans(results[,c("true.a", "naive.a", "mcsimex.a")] - alpha)
+  bias.b <- colMeans(results[,c("true.b", "naive.b", "mcsimex.b")] - beta)
+  ## MSE
+  mse.a <- colMeans((results[,c("true.a", "naive.a", "mcsimex.a")] - alpha)^2)
+  mse.b <- colMeans((results[,c("true.b", "naive.b", "mcsimex.b")] - beta)^2)
+  
+  ## Coverage alpha
+  confint.a <- cbind(alpha,
+        results[,c("true.a")]-1.96*results[,c("true.a.std")],
+        results[,c("true.a")]+1.96*results[,c("true.a.std")],
+        results[,c("naive.a")]-1.96*results[,c("naive.a.std")],
+        results[,c("naive.a")]+1.96*results[,c("naive.a.std")],
+        results[,c("mcsimex.a")]-1.96*results[,c("mcsimex.a.std")],
+        results[,c("mcsimex.a")]+1.96*results[,c("mcsimex.a.std")])
+  coverage.a <- apply(t(apply(confint.a, 1, ind)), 2, mean)
+  
+  ## Coverage beta
+  confint.b <- cbind(beta,
+        results[,c("true.b")]-1.96*results[,c("true.b.std")],
+        results[,c("true.b")]+1.96*results[,c("true.b.std")],
+        results[,c("naive.b")]-1.96*results[,c("naive.b.std")],
+        results[,c("naive.b")]+1.96*results[,c("naive.b.std")],
+        results[,c("mcsimex.b")]-1.96*results[,c("mcsimex.b.std")],
+        results[,c("mcsimex.b")]+1.96*results[,c("mcsimex.b.std")])
+  coverage.b <- apply(t(apply(confint.b, 1, ind)), 2, mean)
+  
+  return(rbind(bias.a,bias.b,mse.a,mse.b,coverage.a,coverage.b))
+}
+
+```
+We generate $n = 1000$ independent training data pairs from a Gaussian mixture model, where the prior probabilities of classes 0 and 1 are $\pi_0 = 5/10$ and $\pi_1 = 5/10$ respectively; class 0 and 1 observations have bivariate normal distributions with means $\mu_0=(-1, 0)$ and $\mu_1=(1, 0)$ respectively, and common identity covariance matrix. The outcome is modelled by logistic regression with linear predictor $\alpha + \beta*\mbox{class}$, where $\alpha=-1$ og $\beta=2$.  
+
+```{r GMM, echo = FALSE}
+# Graphical parameters for this chunck
+par(pty = "s")
+
+# Set seed for reproducibility purposes
+set.seed(2000)
+
+# Model parameters
+pi0 <- 5/10     # Probabiliyt of 1. component
+pi1 <- 1 - pi0  # Probability of 2. component
+mu0 <- c(-1, 0) # Mean parameter of feature 1
+mu1 <- c(1, 0)  # Mean parameter of feature 2
+alpha <- -1     # 
+beta <- 2       #
+
+# Number of samples in each simluation
+n <- 1000
+
+# Simulation and plot of a typical case
+class <- factor(sort(rbinom( n = n, size = 1, prob = pi1)+1))
+feature <- rbind(rmvnorm(sum(class == 1), mu0),
+                 rmvnorm(sum(class == 2), mu1))
+
+# Set plot colours
+ccol = ifelse(class == 1, "red", "black")
+
+plot(feature[, 1], feature[, 2], col = ccol, pch = 16, 
+     xlim = c(-3, 3), ylim = c(-3, 3), xlab = "Feature 1", ylab = "Feature 2")
+
+```
+Obviously, a number of observations will be mis-classfied, so by simulation we investigate the performace of the MC-SIMEX procedure. First we repeat the model above a 1000 times and calculate the mis-classification matrix by monte carlo simulation.
+
+```{r simulation, echo = FALSE}
+# Set up parallel computations
+registerDoParallel(cores = 30)
+rerun <- TRUE
+
+# Number of simulated experiments
+nSim    <- 1000
+nSample <- c(1000)
+probs   <- c(0.2, 0.5)
+method  <- c("GMM", "Kmeans")
+
+# list for results
+simResults <- list()
+parPackages <- c("simex", "mixtools", "mclust", "arrangements")
+
+if(!file.exists("GeneratedData/sim_results_binom.Rdata") || rerun){
+  for(meth in method){
+    for(sampleSize in nSample){
+      for(classProb in probs){
+        simResults[[paste(meth)]][[paste(sampleSize)]][[paste(classProb)]] <-
+          foreach(i=1:nSim,
+                  .combine = "rbind",
+                  .packages = parPackages) %dopar% {
+                      simBinom(n   = sampleSize,
+                               pi0 = classProb,
+                               alpha = alpha,
+                               beta = beta,
+                               mu0 = mu0,
+                               mu1 = mu1,
+                               method = meth)
+        }
+      }
+    }
+  }
+  save(simResults, file = "GeneratedData/sim_results_binom.Rdata")
+}
+```
+
+Summarize the result of the 1000 simulations. We see clearly an attenuation under mislabeling, and considerable improvement under the MC-SIMEX approach.
+```{r simulations, echo = FALSE}
+load("GeneratedData/sim_results_binom.Rdata")
+summariseResults(results, alpha = alpha, beta = beta)
+
+kable(foo, 
+      col.names = c("True", "Naive", "MC-SIMEX"),
+      format = "latex", caption = "Result")
+```
+
+
+## Survival outcome
+
+Now we want to see if how MCSIMEX works with survival data. We generate $n = 1000$ independent training data pairs from a Gaussian mixture model, where the prior probabilities of classes 0 and 1 are $\pi_0 = 5/10$ and $\pi_1 = 5/10$ respectively; class 0 and 1 observations have bivariate normal distributions with means $\mu_0=(-1, 0)$ and $\mu_1=(1, 0)$ respectively, and common identity covariance matrix. The outcome is assumed to be exponentially distributed with rate $\beta*(1+\mbox{class})$ and the censoring time exponentially distributed with reate 0.5. Mis-classification rate is 0.3, see the my.sim function.  
+
+The naive model is for each timepoint estimated by a glm with identity link and Gaussian distribution (just the ordinary linear model) with pseudo observations as outcome and class as predictor. The fitted  generalized linear model has undergone the MC-SIMEX procedure for error correction. Ideally, this should be carried out with gee (e.g. the geese package) and cloglog as link function. I have tried, but it does not straightforwardly work with the simex package. I have compared the results from glm and gee and it is really similar, at least in this setting.
+
+We see clearly an attenuation under mislabeling, and considerable improvement under the MC-SIMEX approach.
+
+This based on random mislabeling and NOT on unsupervised clustering. Maybe this should be changed, but on the other hand pseudo-values in this context is also pretty new.
+
+```{r survival, echo = FALSE}
+ 
+d = my.sim(1000)
+plot(survfit(Surv(d$time,d$status) ~ d$X2)) 
+legend("topright", c("Truth", "KM", "Naive", "MC-SIMEX"), lty = c(1,1,1,1),
+       col = c("Blue", "Black", "Red", "Green"), bty = "n")
+x = 0:50/25
+lines(x, exp(-1*x), col = "blue")
+lines(x, exp(-2*x), col = "blue")
+
+f=prodlim(Hist(time,status)~1,data=d)
+j=jackknife(f,times = 0:50/25)
+
+hatPi = matrix(c(0.7, 0.3, 0.3, 0.7), nrow = 2, byrow = T) # We use here the truth
+colnames(hatPi) <- levels(factor(d$X1))
+rownames(hatPi) <- levels(factor(d$X1))
+
+res.surv = matrix(0, nrow = 51, ncol = 4)
+
+if(!file.exists("results_survival.Rdata")){
+for(i in 1:51){
+  print(i)
+  y = j[,i]
+  fit.glm = glm(y~X2, family = gaussian(link = "identity"), data = d, 
+                x = T, y = T) # Maybe my own cloglog-link
+  fit.mcsimex = mcsimex(fit.glm, SIMEXvariable = "X2", mc.matrix = hatPi, B = 400)
+  res.surv[i,c(1,2)] = predict(fit.glm, type = "response", newdata = data.frame(X2=factor(c(0,1))))
+  res.surv[i,c(3,4)] = predict(fit.mcsimex, type = "response", newdata = data.frame(X2=factor(c(0,1))))
+}
+  save(res.surv, file = "results_survival.Rdata")
+}
+
+load("results_survival.Rdata")
+
+lines(x,res.surv[,1],col = "red")
+lines(x,res.surv[,2],col = "red")
+lines(x,res.surv[,3],col = "green")
+lines(x,res.surv[,4],col = "green")
+
+```
+
+# Cancer subclassification
+Load and data management of multiple myeloma data, GES4581
+
+```{r myeloma data, echo = FALSE}
+# Graphical parameters for this chunck
+par(pty = "s")
+
+# Load GEO4581, containing the data used for classification in Zhan et al. 2006
+
+if(!file.exists("ExternalData/UAMS_GSE4581/gse4581.Rdata")){
+  gse4581 <- getGEO("GSE4581", GSEMatrix = TRUE)[[1]]
+  save(gse4581, file = "ExternalData/UAMS_GSE4581/gse4581.Rdata")
+}
+
+load("ExternalData/UAMS_GSE4581/gse4581.Rdata")
+
+# Extract metadata
+## Get log2(expression) and phenoData
+
+expr.mm <- log2(exprs(gse4581))
+pheno.mm <- pData(gse4581)
+
+## Get treatment regime
+
+pheno.mm$regime <- "TT2"
+pheno.mm$regime[grep("TT3", pheno.mm$title)] <- "TT3"
+
+## Get the eventtime, event, and class phenotype and removing annoying extra chars
+
+pheno.mm$eventtime <- as.character(pheno.mm$characteristics_ch1.2)
+pheno.mm$eventtime <- sub("\\[SURTIM=", "", pheno.mm$eventtime)
+pheno.mm$eventtime <- as.numeric(lapply(strsplit(pheno.mm$eventtime, " "),
+                                        function(x){x[1]}))
+
+pheno.mm$event <- as.character(pheno.mm$characteristics_ch1)
+pheno.mm$event <- sub("\\[SURIND=", "", pheno.mm$event)
+pheno.mm$event <- as.numeric(lapply(strsplit(pheno.mm$event, " "),
+                                        function(x){x[1]}))
+
+pheno.mm$class <-  pData(gse4581)$characteristics_ch1.8
+pheno.mm$class <- sub("\\[Subgrp7=", "", pheno.mm$class)
+pheno.mm$class <- factor(sub("\\]", "", pheno.mm$class))
+pheno.mm$class.no <- as.numeric(pheno.mm$class) 
+
+# Calcualtion of the OS time
+pheno.mm$OS <- Surv(pheno.mm$eventtime, pheno.mm$event)
+
+# Deleting problematic probeset
+expr.mm <- expr.mm[rownames(expr.mm) != "1552256_a_at",]
+
+## Extract training set
+expr.train <-   expr.mm[,pheno.mm$regime == "TT2"]
+pheno.train <- pheno.mm[pheno.mm$regime == "TT2",]
+
+## Extract validation set
+expr.validation <-   expr.mm[,pheno.mm$regime == "TT3"]
+pheno.validation <- pheno.mm[pheno.mm$regime == "TT3",]
+
+```
+
+Filtering and preplotting of myeloma data
+
+```{r myeloma, echo = FALSE}
+
+# Set threshold for prefilter. Zhan et al. 2006 chose 1.34
+
+thres <- 2 # I have pulled this out of the blue :)
+
+# Unspecific prefiltering and transpose of data
+
+filter <- (apply(expr.train, 1, sd) > thres)
+mm.filtered <- t(expr.train[filter,])
+
+# Hierarchical clustering and plot
+
+clusters <- hclust(dist(mm.filtered))
+plot(clusters, labels = F, xlab = "Samples", sub = "", main = "")
+abline(h = 82.5, lty = 2)
+
+# Plot of prefiltered data
+
+pca.mm <- princomp(t(mm.filtered))
+x <- pca.mm[[2]][,1]
+y <- pca.mm[[2]][,2]
+
+fit <- Mclust(mm.filtered, G = 7)
+
+# Superimposing classes in a pca plot
+plot(x,y,col = fit$classification, xlab = "1st PC", ylab = "2nd PC", pch = 16)
+
+# Predict classes in validation set
+pred.validation <- predict(fit,t(expr.validation)[,colnames(mm.filtered)])
+
+# Survival analysis
+
+## Plot of survival against subtypes of the training set
+fit.km <- survfit(pheno.mm$OS ~ pheno.mm$class)
+plot(fit.km, col = 1:7, main = "Training data")
+legend("bottomleft", legend = levels(pheno.mm$class), lty = c(1,1,1,1,1,1,1),
+       col = 1:7, bty = "n")
+
+## Plot of survival against subtype of the validation set
+fit.km <- survfit(pheno.validation$OS ~ pred.validation$classification)
+plot(fit.km, col = 1:7, main = "Validation data")
+
+# Confusion matrix between GMM and Zhan et al.'s (2006) classifications
+conf.mm <- table(fit$classification, pheno.train$class.no)
+
+# Reorder to get "diagonal" matrix
+conf.mm <- conf.mm[opt(conf.mm), ]
+conf.mm
+
+# Accuracy
+sum(diag(conf.mm))/sum(conf.mm)
+
+# Confusion of validation set
+
+conf.validation <- table(pred.validation$classification, pheno.validation$class.no)
+conf.validation <- conf.validation[opt(conf.validation), ]
+conf.validation
+# Accuracy
+sum(diag(conf.validation))/sum(conf.validation)
+
+```
+
+Now correction for misclassification stuff. In the current version based on GMM,
+but maybe kmeans is better. I have kept the kmeans code in #
+
+```{r myeloma simex, echo = FALSE}
+
+# Misclaffification matrix
+
+#fit <- kmeans(mm.filtered, 7)
+fit <- Mclust(mm.filtered, 7)
+
+#ct = fit$classification
+ct <- fit$classification
+
+#Confusion matrix between GMM and Zhan et al.'s (2006) classifications
+conf.mm <- table(ct, pheno.train$class.no)
+
+opt.acc = opt(conf.mm)
+conf.mm <- conf.mm[opt.acc, ]
+
+conf.mm
+
+# 0.632 bootstrap
+
+n = nrow(mm.filtered)
+n.boot = round((1-1/exp(1))*n)
+r.boot = matrix(0, 7, 7, dimnames = list(1:7, 1:7))
+
+
+if(!file.exists("boots.Rdata")){
+for(i in 1:10){
+  boot = sort(sample(1:n, size = n.boot, replace = FALSE))
+  bag = mm.filtered[boot,]
+  outofbag = mm.filtered[-boot,]
+  fit.bag = Mclust(bag, G = 7)
+#  fit.bag = kmeans(bag, 7)
+  pred.outofbag <- predict(fit.bag, outofbag)
+#  pred.outofbag <- predict.kmeans(fit.bag, outofbag)
+  ct.outofbag <- ct[-boot]
+  ctpred.outofbag <- pred.outofbag$classification
+#  ctpred.outofbag = dimnames(pred.outofbag)[[1]]
+#  names(ctpred.outofbag) <- rownames(pred.outofbag$z)
+  o.boot = table(ctpred.outofbag, ct.outofbag)
+  nr <- nrow(o.boot)
+  if(nr < 7) o.boot <- rbind(o.boot,matrix(0,ncol=ncol(o.boot),nrow=7-nr))
+  nc <- ncol(o.boot)
+  if(nc < 7) o.boot <- cbind(o.boot,matrix(0,nrow=nrow(o.boot),ncol=7-nc))
+  o.boot = o.boot[opt(o.boot),]
+  r.boot = r.boot + o.boot[opt(o.boot),]
+}
+  save(r.boot, file = "boots.Rdata")
+}else load("boots.Rdata")
+
+hatPi <- sweep(r.boot, MARGIN = 2, FUN="/", STATS=colSums(r.boot))
+
+xhatPi <- build.mc.matrix(hatPi) # Se test
+colnames(xhatPi) <- levels(factor(pheno.train$class))
+rownames(xhatPi) <- levels(factor(pheno.train$class))
+
+round(xhatPi*100)
+
+## Attenuation corrected survival curves
+
+f=prodlim(Hist(eventtime,event)~1,data= pheno.train)
+j=jackknife(f,times=0:50)
+
+res = matrix(0, nrow = 51, ncol = 14)
+
+if(!file.exists("results_gse4581.Rdata")){
+  for(i in 1:51){
+    print(i)
+    yx = j[,i]
+    fit.glm = glm(yx~class, family = gaussian(link = "identity"), 
+                data = pheno.train, x = T, y = T)
+    fit.mcsimex = mcsimex(fit.glm, SIMEXvariable = "class", 
+                        mc.matrix = xhatPi, B = 400)
+    res[i,1:7] = predict(fit.glm, type = "response", newdata = data.frame(class = factor(levels(factor(pheno.train$class)))))
+    res[i,8:14] = predict(fit.mcsimex, type = "response", newdata = data.frame(class =factor(levels(factor(pheno.train$class)))))
+    }
+  save(res, file = "results_gse4581.Rdata")
+} else load("results_gse4581.Rdata")
+
+fit.km <- survfit(pheno.train$OS ~ pheno.train$class)
+plot(fit.km, col = 1:7, main = "Training data")
+legend("bottomleft", legend = levels(pheno.mm$class), lty = c(1,1,1,1,1,1,1),
+       col = 1:7, bty = "n")
+lines(0:50, res[,8], col = 1, lty = 2)
+lines(0:50, res[,9], col = 2, lty = 2)
+lines(0:50, res[,10], col = 3, lty = 2)
+lines(0:50, res[,11], col = 4, lty = 2)
+lines(0:50, res[,12], col = 5, lty = 2)
+lines(0:50, res[,13], col = 6, lty = 2)
+lines(0:50, res[,14], col = 7, lty = 2)
+
+# Cox regression via Poisson approximation and MC-SIMEX
+
+# Take out problematic 0 time observation and necessary columns, 
+# otherwise it will not run
+pheno.train$id <- 1:nrow(pheno.train)
+pheno.app = pheno.train[-51,c("id", "eventtime","class","event")]
+pheno.app$time = pheno.app$eventtime
+
+cuts <- sort(unique(pheno.app$eventtime[pheno.app$event == 1]))
+pheno.train_splitted <- survSplit(Surv(eventtime, event) ~ ., 
+                            data = pheno.app,
+                            cut = cuts, episode = "tgroup")
+
+pheno.train_splitted$feventtime = factor(pheno.train_splitted$eventtime)
+
+# Ordinary Cox regression
+fit.cox <- coxph(Surv(eventtime, event) ~ class, data = pheno.app)
+
+# Poisson regression as approximation
+fit.poi <- glm(event ~ feventtime + class, data = pheno.train_splitted, 
+               family = poisson, x = T, y = T)
+
+# MC-SIMEX correction of Poisson
+# For some strange reason, this calculation takes sooooo long.
+if(!file.exists("fit.mcsimex.Rdata")){
+  fit.mcsimex <- mcsimex(fit.poi, SIMEXvariable = "class", mc.matrix = xhatPi,
+                         jackknife.estimation = FALSE)
+  save(fit.mcsimex, file = "fit.mcsimex.Rdata")
+} else load("fit.mcsimex.Rdata")
+
+xco <- round(summary(fit.cox)$coefficients[,c(1,3,4,5)],2)        # xco: Cox
+xpo <- round(summary(fit.poi)$coefficients[242:247,],2)           # xpo: Poisson
+xmc <- round(summary(fit.mcsimex)$coefficients[[1]][242:247,],2)  # xmc: MC-SIMEX
+  
+xco
+xpo
+xmc
+
+```
+
