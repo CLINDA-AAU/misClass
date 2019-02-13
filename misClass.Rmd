@@ -20,6 +20,7 @@ library(survival, quietly = T)
 library(arrangements, quietly = T)
 library(foreach)
 library(doParallel)
+library(doRNG)
 
 # Packages from Bioconductor
 library(Biobase)
@@ -214,15 +215,20 @@ simBinom <- function(pi0 = 5/10,      # Probability of 1. component
     results[c("naive.a.std","naive.b.std")] <- sqrt(diag(vcov(naive)))
     
     # Simex
-    fit.class <- mcsimex(naive, mc.matrix = hatPi, SIMEXvariable = "predicted")
-    results[c("mcsimex.a","mcsimex.b")] <- coefficients(fit.class)
-    results[c("mcsimex.a.std","mcsimex.b.std")] <- sqrt(diag(fit.class$variance.asymptotic))
+    # This occationally fails if class is very unbalanced in which case
+    # Simex seems to reassign everything to one class
+    fit.class <- try(mcsimex(naive, mc.matrix = hatPi, SIMEXvariable = "predicted"),
+                     silent = TRUE)
+    if(class(fit.class) == "mcsimex"){
+      results[c("mcsimex.a","mcsimex.b")] <- coefficients(fit.class)
+      results[c("mcsimex.a.std","mcsimex.b.std")] <- sqrt(diag(fit.class$variance.asymptotic))
+    }
   }
   return(results)
 }
 
 ## Function to summarize results from binomial simulations
-summariseResults <- function(results, alpha, beta){
+summarizeResults <- function(results, alpha, beta, digits){
   ## Bias
   bias.a <- colMeans(results[,c("true.a", "naive.a", "mcsimex.a")] - alpha)
   bias.b <- colMeans(results[,c("true.b", "naive.b", "mcsimex.b")] - beta)
@@ -250,7 +256,7 @@ summariseResults <- function(results, alpha, beta){
         results[,c("mcsimex.b")]+1.96*results[,c("mcsimex.b.std")])
   coverage.b <- apply(t(apply(confint.b, 1, ind)), 2, mean)
   
-  return(rbind(bias.a,bias.b,mse.a,mse.b,coverage.a,coverage.b))
+  return(round(rbind(bias.a,bias.b,mse.a,mse.b,coverage.a,coverage.b), digits))
 }
 
 ```
@@ -291,11 +297,12 @@ Obviously, a number of observations will be mis-classfied, so by simulation we i
 ```{r simulation, echo = FALSE}
 # Set up parallel computations
 registerDoParallel(cores = 30)
-rerun <- TRUE
+registerDoRNG(seed = 123)
+rerun <- FALSE
 
 # Number of simulated experiments
-nSim    <- 100
-nSample <- c(1000)
+nSim    <- 1000
+nSample <- c(200, 500, 1000)
 probs   <- c(0.2, 0.5)
 method  <- c("GMM", "Kmeans")
 
@@ -305,11 +312,12 @@ parPackages <- c("simex", "mixtools", "mclust", "arrangements")
 
 if(!file.exists("GeneratedData/sim_results_binom.RData") || rerun){
   for(meth in method){
-    for(sampleSize in nSample){
-      for(classProb in probs){
-        simResults[[paste(meth)]][[paste(sampleSize)]][[paste(classProb)]] <-
+    for(classProb in probs){
+      for(sampleSize in nSample){
+        simResults[[paste(meth)]][[paste(classProb)]][[paste(sampleSize)]] <-
           foreach(i=1:nSim,
                   .combine = "rbind",
+                  .errorhandling = "pass",
                   .packages = parPackages) %dopar% {
                       simBinom(n   = sampleSize,
                                pi0 = classProb,
@@ -329,21 +337,29 @@ if(!file.exists("GeneratedData/sim_results_binom.RData") || rerun){
 Summarize the result of the 1000 simulations. We see clearly an attenuation under mislabeling, and considerable improvement under the MC-SIMEX approach.
 ```{r simulations, echo = FALSE}
 load("GeneratedData/sim_results_binom.RData")
-for(meth in method){
-  for(sampleSize in nSample){
-    for(classProb in probs){
-      cat(paste(meth),paste(sampleSize),paste(classProb),"\n")
-      print(summariseResults(simResults[[paste(meth)]][[paste(sampleSize)]][[paste(classProb)]],
-                       alpha = alpha,
-                       beta = beta)
-      )
-    }
-  }
-}
 
-kable(foo, 
-      col.names = c("True", "Naive", "MC-SIMEX"),
-      format = "latex", caption = "Result")
+## Summarize results
+summarizeResultsList <- function(x) summarizeResults(x, alpha = alpha, beta = beta, digits = 2)
+rs <- lapply(simResults, function(x) lapply(x, function(x) lapply(x, summarizeResultsList)))
+
+lapply(simResults, function(x) lapply(x, function(x) lapply(x, nrow)))
+
+balanced <- cbind(rep(names(rs$GMM$`0.5`), each = 6),
+                      do.call(rbind, rs$GMM$`0.5`),
+                      do.call(rbind, rs$Kmeans$`0.5`))
+unbalanced <- cbind(rep(names(rs$GMM$`0.2`), each = 6),
+                      do.call(rbind, rs$GMM$`0.2`),
+                      do.call(rbind, rs$Kmeans$`0.2`))
+
+kable(balanced, 
+      col.names = c("nSample", "GMM True", "GMM Naive", "GMM Simex",
+                    "KM True", "KM Naive", "KM Simex"),
+      caption = "Binomial simulation results with balanced classes")
+kable(unbalanced, 
+      col.names = c("nSample", "GMM True", "GMM Naive", "GMM Simex",
+                    "KM True", "KM Naive", "KM Simex"),
+      caption = "Binomial simulation results with unbalanced classes")
+
 ```
 
 
