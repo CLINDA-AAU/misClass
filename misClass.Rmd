@@ -21,6 +21,7 @@ library(arrangements, quietly = T)
 library(foreach)
 library(doParallel)
 library(doRNG)
+library(Hmisc)
 
 # Packages from Bioconductor
 library(Biobase)
@@ -86,6 +87,8 @@ Pi <- function(fit){
         hatPi[i,j] <- mean(p.x == i)
       }
     }
+    reord <- order(fit$parameters$mean[1,])
+    hatPi <- hatPi[reord, reord]
   }
   if(class(fit) == "kmeans"){
     cl <- unique(fit$cluster)
@@ -99,6 +102,8 @@ Pi <- function(fit){
         hatPi[i,j] <- mean(p.x == i)
       }
     }
+    reord <- order(fit$centers[,1])
+    hatPi <- hatPi[reord, reord]
   }
   hatPi
 }
@@ -193,6 +198,7 @@ simBinom <- function(pi0 = 5/10,      # Probability of 1. component
   if(method == "Kmeans"){
     # Fit K.means with two clusters
     fit <- kmeans(train[,c("feature.1", "feature.2")], 2)
+    
     
     # Classification of training data
     pred <- predict.kmeans(fit, newdata = train[,c("feature.1", "feature.2")],
@@ -299,6 +305,7 @@ plot(feature[, 1], feature[, 2], col = ccol, pch = 16,
      xlim = c(-3, 3), ylim = c(-3, 3), xlab = "Feature 1", ylab = "Feature 2")
 
 ```
+
 Obviously, a number of observations will be mis-classfied, so by simulation we investigate the performace of the MC-SIMEX procedure. First we repeat the model above a 1000 times and calculate the mis-classification matrix by monte carlo simulation.
 
 ```{r simulation, echo = FALSE}
@@ -349,8 +356,6 @@ load("GeneratedData/sim_results_binom.RData")
 summarizeResultsList <- function(x) summarizeResults(x, alpha = alpha, beta = beta, digits = 2)
 rs <- lapply(simResults, function(x) lapply(x, function(x) lapply(x, summarizeResultsList)))
 
-lapply(simResults, function(x) lapply(x, function(x) lapply(x, nrow)))
-
 balanced <- cbind(rep(names(rs$GMM$`0.5`), each = 6),
                       do.call(rbind, rs$GMM$`0.5`),
                       do.call(rbind, rs$Kmeans$`0.5`))
@@ -370,9 +375,9 @@ kable(unbalanced,
 ```
 
 
-```{r, echo = FALSE}
+```{r, echo = FALSE, warning = FALSE}
 ## Create Latex tables
-Hmisc::latex(balanced[,-1],
+tBal <- Hmisc::latex(balanced[,-1],
              title = "",
              cgroup = c("GMM", "Kmeans"),
              n.cgroup = c(3,3),
@@ -383,7 +388,7 @@ Hmisc::latex(balanced[,-1],
              caption = "Results from balanced simulations",
              label = "simResults:balanced"
              )
-Hmisc::latex(unbalanced[,-1],
+tUbal <- Hmisc::latex(unbalanced[,-1],
              title = "",
              cgroup = c("GMM", "Kmeans"),
              n.cgroup = c(3,3),
@@ -392,7 +397,7 @@ Hmisc::latex(unbalanced[,-1],
              file = "unbalanced.tex",
              colheads = c(rep(c("True", "Naive","Simex"),2)),
              caption = "Results from unbalanced simulations",
-             label = "simResults:balanced"
+             label = "simResults:unbalanced"
              )
 ```
 
