@@ -108,18 +108,24 @@ Pi <- function(fit){
 # i.e. a component in coverage calculations.
 ind <- function(x){
   res <- c(0,0,0)
-  if (x[1] >= x[2] & x[1] <= x[3]) 
+  if(x[1] >= x[2] & x[1] <= x[3]){
     res[1] <- 1
-  else 
+  } else{
     res[1] <- 0
-  if (x[1] >= x[4] & x[1] <= x[5]) 
+  }
+  if(x[1] >= x[4] & x[1] <= x[5]){
     res[2] <- 1
-  else 
+  } else{
     res[2] <- 0
-  if (x[1] >= x[6] & x[1] <= x[7]) 
-    res[3] <- 1
-  else 
-    res[3] <- 0
+  }
+  if(is.na(x[6])){
+    res[3] <- NA
+  } else{
+    if (x[1] >= x[6] & x[1] <= x[7]) 
+      res[3] <- 1
+    else 
+      res[3] <- 0
+  }
   return(res)
 }
 
@@ -230,12 +236,13 @@ simBinom <- function(pi0 = 5/10,      # Probability of 1. component
 ## Function to summarize results from binomial simulations
 summarizeResults <- function(results, alpha, beta, digits){
   ## Bias
-  bias.a <- colMeans(results[,c("true.a", "naive.a", "mcsimex.a")] - alpha)
-  bias.b <- colMeans(results[,c("true.b", "naive.b", "mcsimex.b")] - beta)
+  bias.a <- colMeans(results[,c("true.a", "naive.a", "mcsimex.a")] - alpha, na.rm = TRUE)
+  bias.b <- colMeans(results[,c("true.b", "naive.b", "mcsimex.b")] - beta, na.rm = TRUE)
   ## MSE
-  mse.a <- colMeans((results[,c("true.a", "naive.a", "mcsimex.a")] - alpha)^2)
-  mse.b <- colMeans((results[,c("true.b", "naive.b", "mcsimex.b")] - beta)^2)
+  mse.a <- colMeans((results[,c("true.a", "naive.a", "mcsimex.a")] - alpha)^2, na.rm = TRUE)
+  mse.b <- colMeans((results[,c("true.b", "naive.b", "mcsimex.b")] - beta)^2, na.rm = TRUE)
   
+  meanNA <- function(x) mean(x, na.rm = T)
   ## Coverage alpha
   confint.a <- cbind(alpha,
         results[,c("true.a")]-1.96*results[,c("true.a.std")],
@@ -244,7 +251,7 @@ summarizeResults <- function(results, alpha, beta, digits){
         results[,c("naive.a")]+1.96*results[,c("naive.a.std")],
         results[,c("mcsimex.a")]-1.96*results[,c("mcsimex.a.std")],
         results[,c("mcsimex.a")]+1.96*results[,c("mcsimex.a.std")])
-  coverage.a <- apply(t(apply(confint.a, 1, ind)), 2, mean)
+  coverage.a <- apply(t(apply(confint.a, 1, ind)), 2, meanNA)
   
   ## Coverage beta
   confint.b <- cbind(beta,
@@ -254,7 +261,7 @@ summarizeResults <- function(results, alpha, beta, digits){
         results[,c("naive.b")]+1.96*results[,c("naive.b.std")],
         results[,c("mcsimex.b")]-1.96*results[,c("mcsimex.b.std")],
         results[,c("mcsimex.b")]+1.96*results[,c("mcsimex.b.std")])
-  coverage.b <- apply(t(apply(confint.b, 1, ind)), 2, mean)
+  coverage.b <- apply(t(apply(confint.b, 1, ind)), 2, meanNA)
   
   return(round(rbind(bias.a,bias.b,mse.a,mse.b,coverage.a,coverage.b), digits))
 }
@@ -360,6 +367,33 @@ kable(unbalanced,
                     "KM True", "KM Naive", "KM Simex"),
       caption = "Binomial simulation results with unbalanced classes")
 
+```
+
+
+```{r, echo = FALSE}
+## Create Latex tables
+Hmisc::latex(balanced[,-1],
+             title = "",
+             cgroup = c("GMM", "Kmeans"),
+             n.cgroup = c(3,3),
+             rgroup = c(200,500,1000),
+             n.rgroup = c(6,6,6),
+             file = "balanced.tex",
+             colheads = c(rep(c("True", "Naive","Simex"),2)),
+             caption = "Results from balanced simulations",
+             label = "simResults:balanced"
+             )
+Hmisc::latex(unbalanced[,-1],
+             title = "",
+             cgroup = c("GMM", "Kmeans"),
+             n.cgroup = c(3,3),
+             rgroup = c(200,500,1000),
+             n.rgroup = c(6,6,6),
+             file = "unbalanced.tex",
+             colheads = c(rep(c("True", "Naive","Simex"),2)),
+             caption = "Results from unbalanced simulations",
+             label = "simResults:balanced"
+             )
 ```
 
 
