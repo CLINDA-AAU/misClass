@@ -22,6 +22,8 @@ library(foreach)
 library(doParallel)
 library(doRNG)
 library(Hmisc)
+library(survminer)
+library(ggdendro)
 
 # Packages from Bioconductor
 library(Biobase)
@@ -333,7 +335,7 @@ plot(feature[, 1], feature[, 2], col = ccol, pch = 16,
 
 ```
 
-Obviously, a number of observations will be mis-classfied, so by simulation we investigate the performace of the MC-SIMEX procedure. First we repeat the model above a 1000 times and calculate the mis-classification matrix by monte carlo simulation.
+Obviously, a number of observations will be mis-classfied, so by simulation we investigate the performace of the MC-SIMEX procedure. A range of scenarios similar to the one described above was tested by varying both the number of training data pairs $n = (200, 500, 1000)$ and the class probability $\pi_0 = (0.2, 0.5)$ . Each scenario was repeated 1000 times to calculate the mis-classification matrix by monte carlo simulation. We performed unsupervised clustering with GMM and Kmeans.
 
 ```{r simulation, echo = FALSE}
 # Set up parallel computations
@@ -524,7 +526,7 @@ pheno.mm$class <- sub("\\[Subgrp7=", "", pheno.mm$class)
 pheno.mm$class <- factor(sub("\\]", "", pheno.mm$class))
 pheno.mm$class.no <- as.numeric(pheno.mm$class) 
 
-# Calcualtion of the OS time
+# Calculation of the OS time
 pheno.mm$OS <- Surv(pheno.mm$eventtime, pheno.mm$event)
 
 # Deleting problematic probeset
@@ -559,16 +561,28 @@ clusters <- hclust(dist(mm.filtered))
 plot(clusters, labels = F, xlab = "Samples", sub = "", main = "")
 abline(h = 82.5, lty = 2)
 
+p <- ggdendrogram(as.dendrogram(clusters), labels=F, leaf_labels = F) + 
+  coord_cartesian(ylim = c(40,100)) +
+  geom_hline(yintercept = 82.5) + 
+  theme_classic() +
+  ylab("Height") +
+   theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+p
+
 # Plot of prefiltered data
 
 pca.mm <- princomp(t(mm.filtered))
-x <- pca.mm[[2]][,1]
-y <- pca.mm[[2]][,2]
-
 fit <- Mclust(mm.filtered, G = 7)
 
 # Superimposing classes in a pca plot
-plot(x,y,col = fit$classification, xlab = "1st PC", ylab = "2nd PC", pch = 16)
+plotdata <- data.frame("PC1" = pca.mm[[2]][,1],
+                       "PC2" = pca.mm[[2]][,2],
+                       "Class" = factor(fit$classification))
+ggplot(plotdata, aes(x = PC1, y = PC2, col = Class)) +
+  geom_point() + stat_ellipse()
+
 
 # Predict classes in validation set
 pred.validation <- predict(fit,t(expr.validation)[,colnames(mm.filtered)])
@@ -577,13 +591,34 @@ pred.validation <- predict(fit,t(expr.validation)[,colnames(mm.filtered)])
 
 ## Plot of survival against subtypes of the training set
 fit.km <- survfit(pheno.mm$OS ~ pheno.mm$class)
-plot(fit.km, col = 1:7, main = "Training data")
-legend("bottomleft", legend = levels(pheno.mm$class), lty = c(1,1,1,1,1,1,1),
-       col = 1:7, bty = "n")
+names(fit.km$strata) <- sub("class=", "", names(fit.km$strata))
+fit.km.plot <- ggsurvplot(fit.km,
+           data = pheno.mm,
+           title = "Training data")
+fit.km.plot$plot <- fit.km.plot$plot +
+  theme(legend.title = element_blank(),
+           legend.justification=c(0,1), 
+           legend.position=c(0.05, 0.5),
+           legend.background = element_blank(),
+           legend.key = element_blank(),
+          legend.text=element_text(size=12))
+fit.km.plot
 
 ## Plot of survival against subtype of the validation set
-fit.km <- survfit(pheno.validation$OS ~ pred.validation$classification)
-plot(fit.km, col = 1:7, main = "Validation data")
+pheno.validation$newClass <- pred.validation$classification
+fit.km <- survfit(pheno.validation$OS ~ pheno.validation$newClass)
+names(fit.km$strata) <- sub("newClass=", "", names(fit.km$strata))
+fit.km.plot <- ggsurvplot(fit.km,
+           data = pheno.validation,
+           title = "Validation data")
+fit.km.plot$plot <- fit.km.plot$plot +
+  theme(legend.title = element_blank(),
+           legend.justification=c(0,1), 
+           legend.position=c(0.05, 0.5),
+           legend.background = element_blank(),
+           legend.key = element_blank(),
+          legend.text=element_text(size=12))
+fit.km.plot
 
 # Confusion matrix between GMM and Zhan et al.'s (2006) classifications
 conf.mm <- table(fit$classification, pheno.train$class.no)
@@ -661,23 +696,33 @@ if(!file.exists("GeneratedData/results_gse4581.RData")){
                 data = pheno.train, x = T, y = T)
     fit.mcsimex = mcsimex(fit.glm, SIMEXvariable = "class", 
                         mc.matrix = xhatPi, B = 400)
-    res[i,1:7] = predict(fit.glm, type = "response", newdata = data.frame(class = factor(levels(factor(pheno.train$class)))))
-    res[i,8:14] = predict(fit.mcsimex, type = "response", newdata = data.frame(class =factor(levels(factor(pheno.train$class)))))
+    res[i,1:7] = predict(fit.glm, type = "response",
+                         newdata = data.frame(class = factor(levels(factor(pheno.train$class)))))
+    res[i,8:14] = predict(fit.mcsimex, type = "response",
+                          newdata = data.frame(class =factor(levels(factor(pheno.train$class)))))
     }
   save(res, file = "GeneratedData/results_gse4581.RData")
 } else load("GeneratedData/results_gse4581.RData")
 
+## GGplot
 fit.km <- survfit(pheno.train$OS ~ pheno.train$class)
-plot(fit.km, col = 1:7, main = "Training data")
-legend("bottomleft", legend = levels(pheno.mm$class), lty = c(1,1,1,1,1,1,1),
-       col = 1:7, bty = "n")
-lines(0:50, res[,8], col = 1, lty = 2)
-lines(0:50, res[,9], col = 2, lty = 2)
-lines(0:50, res[,10], col = 3, lty = 2)
-lines(0:50, res[,11], col = 4, lty = 2)
-lines(0:50, res[,12], col = 5, lty = 2)
-lines(0:50, res[,13], col = 6, lty = 2)
-lines(0:50, res[,14], col = 7, lty = 2)
+names(fit.km$strata) <- sub("class=", "", names(fit.km$strata))
+resSimex <- data.frame(res[,8:14])
+colnames(resSimex) <- sub("pheno.train\\$", "", names(fit.km$strata))
+resSimex <- reshape2::melt(resSimex)
+resSimex$x <- rep(0:50, 7)
+
+p <- ggsurvplot(fit.km, 
+           data = pheno.train)
+p$plot <- p$plot + 
+  geom_line(data = resSimex, aes(x = x, y = value, col = variable), linetype = "dashed") +
+  theme(legend.title = element_blank(),
+           legend.justification=c(0,1), 
+           legend.position=c(0.05, 0.5),
+           legend.background = element_blank(),
+           legend.key = element_blank(),
+          legend.text=element_text(size=12))
+p
 
 # Cox regression via Poisson approximation and MC-SIMEX
 
