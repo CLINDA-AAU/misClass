@@ -272,6 +272,33 @@ summarizeResults <- function(results, alpha, beta, digits){
   return(round(rbind(bias.a,bias.b,mse.a,mse.b,coverage.a,coverage.b), digits))
 }
 
+bootConf <- function(n.boot, data, orig.class, method = "GMM"){
+  boot = sort(sample(1:n, size = n.boot, replace = FALSE))
+  bag = data[boot,]
+  outofbag = data[-boot,]
+  ct.outofbag <- orig.class[-boot]
+  
+  if(method == "GMM"){
+    fit.bag = Mclust(bag, G = 7)
+    pred.outofbag <- predict(fit.bag, outofbag)
+    ctpred.outofbag <- pred.outofbag$classification
+  }
+  if(method =="Kmeans"){
+    fit.bag = kmeans(bag, 7)
+    pred.outofbag <- predict.kmeans(fit.bag, outofbag)
+    ctpred.outofbag = dimnames(pred.outofbag)[[1]]
+    names(ctpred.outofbag) <- rownames(pred.outofbag$z)
+  }
+  
+  o.boot = table(ctpred.outofbag, ct.outofbag)
+  nr <- nrow(o.boot)
+  if(nr < 7) o.boot <- rbind(o.boot,matrix(0,ncol=ncol(o.boot),nrow=7-nr))
+  nc <- ncol(o.boot)
+  if(nc < 7) o.boot <- cbind(o.boot,matrix(0,nrow=nrow(o.boot),ncol=7-nc))
+  o.boot = o.boot[opt(o.boot),]
+  return(o.boot)
+}
+
 ```
 We generate $n = 1000$ independent training data pairs from a Gaussian mixture model, where the prior probabilities of classes 0 and 1 are $\pi_0 = 5/10$ and $\pi_1 = 5/10$ respectively; class 0 and 1 observations have bivariate normal distributions with means $\mu_0=(-1, 0)$ and $\mu_1=(1, 0)$ respectively, and common identity covariance matrix. The outcome is modelled by logistic regression with linear predictor $\alpha + \beta*\mbox{class}$, where $\alpha=-1$ og $\beta=2$.  
 
@@ -582,7 +609,6 @@ Now correction for misclassification stuff. In the current version based on GMM,
 but maybe kmeans is better. I have kept the kmeans code in #
 
 ```{r myeloma simex, echo = FALSE}
-
 # Misclaffification matrix
 
 #fit <- kmeans(mm.filtered, 7)
@@ -593,57 +619,39 @@ ct <- fit$classification
 
 #Confusion matrix between GMM and Zhan et al.'s (2006) classifications
 conf.mm <- table(ct, pheno.train$class.no)
-
 opt.acc = opt(conf.mm)
 conf.mm <- conf.mm[opt.acc, ]
-
 conf.mm
 
 # 0.632 bootstrap
-
 n = nrow(mm.filtered)
 n.boot = round((1-1/exp(1))*n)
-r.boot = matrix(0, 7, 7, dimnames = list(1:7, 1:7))
-
 
 if(!file.exists("GeneratedData/boots.RData")){
-for(i in 1:10){
-  boot = sort(sample(1:n, size = n.boot, replace = FALSE))
-  bag = mm.filtered[boot,]
-  outofbag = mm.filtered[-boot,]
-  fit.bag = Mclust(bag, G = 7)
-#  fit.bag = kmeans(bag, 7)
-  pred.outofbag <- predict(fit.bag, outofbag)
-#  pred.outofbag <- predict.kmeans(fit.bag, outofbag)
-  ct.outofbag <- ct[-boot]
-  ctpred.outofbag <- pred.outofbag$classification
-#  ctpred.outofbag = dimnames(pred.outofbag)[[1]]
-#  names(ctpred.outofbag) <- rownames(pred.outofbag$z)
-  o.boot = table(ctpred.outofbag, ct.outofbag)
-  nr <- nrow(o.boot)
-  if(nr < 7) o.boot <- rbind(o.boot,matrix(0,ncol=ncol(o.boot),nrow=7-nr))
-  nc <- ncol(o.boot)
-  if(nc < 7) o.boot <- cbind(o.boot,matrix(0,nrow=nrow(o.boot),ncol=7-nc))
-  o.boot = o.boot[opt(o.boot),]
-  r.boot = r.boot + o.boot[opt(o.boot),]
-}
+  # Set up parallel computations
+  registerDoParallel(cores = 30)
+  registerDoRNG(seed = 321)
+  
+  r.boot <- foreach(i=1:100, .combine = "+")  %dopar% {
+    bootConf(n.boot = n.boot,
+             data = mm.filtered,
+             orig.class = ct,
+             method = "GMM")
+  }
   save(r.boot, file = "GeneratedData/boots.RData")
-}else load("GeneratedData/boots.RData")
+} else load("GeneratedData/boots.RData")
 
+## Build hatPi matrix from bootstraps
 hatPi <- sweep(r.boot, MARGIN = 2, FUN="/", STATS=colSums(r.boot))
-
 xhatPi <- build.mc.matrix(hatPi) # Se test
 colnames(xhatPi) <- levels(factor(pheno.train$class))
 rownames(xhatPi) <- levels(factor(pheno.train$class))
-
 round(xhatPi*100)
 
 ## Attenuation corrected survival curves
-
-f=prodlim(Hist(eventtime,event)~1,data= pheno.train)
-j=jackknife(f,times=0:50)
-
-res = matrix(0, nrow = 51, ncol = 14)
+f <- prodlim(Hist(eventtime,event)~1,data= pheno.train)
+j <- jackknife(f,times=0:50)
+res <- matrix(0, nrow = 51, ncol = 14)
 
 if(!file.exists("GeneratedData/results_gse4581.RData")){
   for(i in 1:51){
