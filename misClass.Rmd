@@ -412,7 +412,7 @@ tBal <- Hmisc::latex(balanced[,-1],
              n.cgroup = c(3,3),
              rgroup = c(200,500,1000),
              n.rgroup = c(6,6,6),
-             file = "balanced.tex",
+             file = "Output/Tables/balanced.tex",
              colheads = c(rep(c("True", "Naive","Simex"),2)),
              caption = "Results from balanced simulations",
              label = "simResults:balanced"
@@ -423,7 +423,7 @@ tUbal <- Hmisc::latex(unbalanced[,-1],
              n.cgroup = c(3,3),
              rgroup = c(200,500,1000),
              n.rgroup = c(6,6,6),
-             file = "unbalanced.tex",
+             file = "Output/Tables/unbalanced.tex",
              colheads = c(rep(c("True", "Naive","Simex"),2)),
              caption = "Results from unbalanced simulations",
              label = "simResults:unbalanced"
@@ -545,44 +545,41 @@ pheno.validation <- pheno.mm[pheno.mm$regime == "TT3",]
 Filtering and preplotting of myeloma data
 
 ```{r myeloma, echo = FALSE}
-
 # Set threshold for prefilter. Zhan et al. 2006 chose 1.34
-
 thres <- 2 # I have pulled this out of the blue :)
 
 # Unspecific prefiltering and transpose of data
-
 filter <- (apply(expr.train, 1, sd) > thres)
 mm.filtered <- t(expr.train[filter,])
 
 # Hierarchical clustering and plot
-
 clusters <- hclust(dist(mm.filtered))
-plot(clusters, labels = F, xlab = "Samples", sub = "", main = "")
-abline(h = 82.5, lty = 2)
 
-p <- ggdendrogram(as.dendrogram(clusters), labels=F, leaf_labels = F) + 
+fig.mm.hclust <- ggdendrogram(clusters, labels=F, leaf_labels = F) + 
   coord_cartesian(ylim = c(40,100)) +
   geom_hline(yintercept = 82.5) + 
   theme_classic() +
   ylab("Height") +
-   theme(axis.title.x=element_blank(),
+  theme(axis.title.x=element_blank(),
         axis.text.x=element_blank(),
         axis.ticks.x=element_blank())
-p
+fig.mm.hclust
 
 # Plot of prefiltered data
-
 pca.mm <- princomp(t(mm.filtered))
 fit <- Mclust(mm.filtered, G = 7)
 
 # Superimposing classes in a pca plot
-plotdata <- data.frame("PC1" = pca.mm[[2]][,1],
-                       "PC2" = pca.mm[[2]][,2],
-                       "Class" = factor(fit$classification))
-ggplot(plotdata, aes(x = PC1, y = PC2, col = Class)) +
-  geom_point() + stat_ellipse()
+pca.plotdata <- data.frame("PC1" = pca.mm[[2]][,1],
+                           "PC2" = pca.mm[[2]][,2],
+                           "Class" = factor(fit$classification))
+fig.mm.pca <- ggplot(pca.plotdata, aes(x = PC1, y = PC2, col = Class)) +
+  geom_point() + stat_ellipse() +
+  ggtitle("PCA plot for GSE4581")
+fig.mm.pca
 
+# Predict classes in training data
+pred.train <- fit$classification
 
 # Predict classes in validation set
 pred.validation <- predict(fit,t(expr.validation)[,colnames(mm.filtered)])
@@ -590,55 +587,84 @@ pred.validation <- predict(fit,t(expr.validation)[,colnames(mm.filtered)])
 # Survival analysis
 
 ## Plot of survival against subtypes of the training set
-fit.km <- survfit(pheno.mm$OS ~ pheno.mm$class)
-names(fit.km$strata) <- sub("class=", "", names(fit.km$strata))
-fit.km.plot <- ggsurvplot(fit.km,
-           data = pheno.mm,
-           title = "Training data")
-fit.km.plot$plot <- fit.km.plot$plot +
+pheno.train$newClass <- pred.train
+fit.km <- survfit(pheno.train$OS ~ pheno.train$newClass)
+names(fit.km$strata) <- sub("newClass=", "", names(fit.km$strata))
+fig.mm.surv.train <- ggsurvplot(fit.km,
+                                data = pheno.train,
+                                title = "Training data")
+fig.mm.surv.train$plot <- fig.mm.surv.train$plot +
   theme(legend.title = element_blank(),
-           legend.justification=c(0,1), 
-           legend.position=c(0.05, 0.5),
-           legend.background = element_blank(),
-           legend.key = element_blank(),
-          legend.text=element_text(size=12))
-fit.km.plot
+        legend.justification=c(0,1), 
+        legend.position=c(0.05, 0.6),
+        legend.background = element_blank(),
+        legend.key = element_blank(),
+        legend.text=element_text(size=12))
+fig.mm.surv.train
 
 ## Plot of survival against subtype of the validation set
 pheno.validation$newClass <- pred.validation$classification
 fit.km <- survfit(pheno.validation$OS ~ pheno.validation$newClass)
 names(fit.km$strata) <- sub("newClass=", "", names(fit.km$strata))
-fit.km.plot <- ggsurvplot(fit.km,
+fig.mm.surv.val <- ggsurvplot(fit.km,
            data = pheno.validation,
            title = "Validation data")
-fit.km.plot$plot <- fit.km.plot$plot +
+fig.mm.surv.val$plot <- fig.mm.surv.val$plot +
   theme(legend.title = element_blank(),
            legend.justification=c(0,1), 
-           legend.position=c(0.05, 0.5),
+           legend.position=c(0.05, 0.6),
            legend.background = element_blank(),
            legend.key = element_blank(),
           legend.text=element_text(size=12))
-fit.km.plot
+fig.mm.surv.val
 
 # Confusion matrix between GMM and Zhan et al.'s (2006) classifications
-conf.mm <- table(fit$classification, pheno.train$class.no)
+conf.mm <- table(fit$classification, pheno.train$class)#.no)
 
 # Reorder to get "diagonal" matrix
 conf.mm <- conf.mm[opt(conf.mm), ]
 conf.mm
 
 # Accuracy
-sum(diag(conf.mm))/sum(conf.mm)
+conf.mm.acc <- sum(diag(conf.mm))/sum(conf.mm)
+conf.mm.acc
 
 # Confusion of validation set
 
-conf.validation <- table(pred.validation$classification, pheno.validation$class.no)
+conf.validation <- table(pred.validation$classification, pheno.validation$class)#.no)
 conf.validation <- conf.validation[opt(conf.validation), ]
 conf.validation
 # Accuracy
-sum(diag(conf.validation))/sum(conf.validation)
-
+conf.mm.acc.val <- sum(diag(conf.validation))/sum(conf.validation)
+conf.mm.acc.val
 ```
+
+```{r, echo = FALSE}
+## Dump figures
+ggsave(fig.mm.pca, file = "Output/Figures/fig_mm_pca.pdf",
+       height = 7, width = 7, dpi = 300)
+comb.plot <- arrange_ggsurvplots(list(fig.mm.surv.train, fig.mm.surv.val))
+ggsave(comb.plot,
+       file = "Output/Figures/fig_mm_surv.pdf", height = 4, width = 7, dpi = 300)
+```
+
+```{r, echo = FALSE}
+## Dump tables
+tab.conf.mm <- Hmisc::latex(conf.mm,
+             title = "",
+             file = "Output/Tables/conf.mm.tex",
+             caption = paste("Confusion matrix for training set of GSE4581, accuracy = ",
+                             round(conf.mm.acc,2)),
+             label = "confmm:train")
+
+tab.conf.mm <- Hmisc::latex(conf.validation,
+             title = "",
+             file = "Output/Tables/conf.mm.val.tex",
+             caption = paste("Confusion matrix for validation set of GSE4581, accuracy = ",
+                             round(conf.mm.acc.val,2)),
+             label = "confmm:val")
+```
+
 
 Now correction for misclassification stuff. In the current version based on GMM,
 but maybe kmeans is better. I have kept the kmeans code in #
@@ -712,9 +738,9 @@ colnames(resSimex) <- sub("pheno.train\\$", "", names(fit.km$strata))
 resSimex <- reshape2::melt(resSimex)
 resSimex$x <- rep(0:50, 7)
 
-p <- ggsurvplot(fit.km, 
+fig.mm.surv.simex <- ggsurvplot(fit.km, 
            data = pheno.train)
-p$plot <- p$plot + 
+fig.mm.surv.simex$plot <- fig.mm.surv.simex$plot + 
   geom_line(data = resSimex, aes(x = x, y = value, col = variable), linetype = "dashed") +
   theme(legend.title = element_blank(),
            legend.justification=c(0,1), 
@@ -722,7 +748,7 @@ p$plot <- p$plot +
            legend.background = element_blank(),
            legend.key = element_blank(),
           legend.text=element_text(size=12))
-p
+fig.mm.surv.simex
 
 # Cox regression via Poisson approximation and MC-SIMEX
 
@@ -761,6 +787,22 @@ xmc <- round(summary(fit.mcsimex)$coefficients[[1]][242:247,],2)  # xmc: MC-SIME
 xco
 xpo
 xmc
+```
 
+
+```{r, echo = FALSE}
+ggsave(fig.mm.surv.simex$plot, file = "Output/Figures/fig_mm_surv_simex.pdf",
+       height = 7, width = 7, dpi = 300)
+
+combTable <- rbind(xpo, xmc)
+rownames(combTable) <- sub("class", "", rownames(combTable))
+combout <- latex(combTable,
+                 title = "Class",
+                 file = "Output/Tables/poisson_simex.tex",
+                 rgroup = c("Poisson", "MC-SIMEX"),
+                 n.group = c(nrow(xpo), nrow(xmc)),
+                 label = "tab:poissim",
+                 caption = "Results from poisson regression in GSE4581 with MC-SIMEX corrected values"
+)
 ```
 
