@@ -1,0 +1,286 @@
+---
+title: "Load and process data from Zhan et al. 2006"
+author: "TYM"
+date: "`r format(Sys.time(), '%d-%m-%Y')`, Aalborg, Denmark"
+output: html_document
+---
+
+Load packages.
+```{r}
+library(affy)
+library(hgu133plus2cdf)
+library(GEOquery)
+library(magrittr)
+library(tidyverse)
+library(arrangements)
+library(mclust)
+
+# Reordering a confusion matrix to optimize accuracy
+opt <- function(x){
+  acc <- function(x)
+  {
+    sum(diag(x))/sum(x)
+  }
+  pe <- permutations(7,7)
+  curr.x <- acc(x)
+  curr.i <- 1:7
+  for(i in 1:nrow(pe)){
+    if(acc(x[pe[i,],])>curr.x){ 
+      curr.i = pe[i,]
+      curr.x <- acc(x[pe[i,],])
+    }
+  }
+  curr.i
+}
+```
+Download the raw .CEL files from Zhan et al. 2006.
+```{r}
+getGEOSuppFiles("GSE24080",baseDir = "ExternalData/MAQCII_GSE24080",makeDirectory = FALSE)
+```
+
+Decompress the data and delete compressed data.
+```{bash}
+# .CEL files. 
+tar -xvf ExternalData/MAQCII_GSE24080/GSE24080_RAW.tar -C ExternalData/MAQCII_GSE24080/ 
+rm ExternalData/MAQCII_GSE24080/GSE24080_RAW.tar
+```
+
+Load the preprocessed GSE datasets to cross reference IDs.
+```{r}
+# Load the two datasets.
+if(!file.exists("ExternalData/UAMS_GSE4581/gse4581.RData")){
+  gse4581 <- getGEO("GSE4581", GSEMatrix = TRUE,destdir = "ExternalData/UAMS_GSE4581")[[1]]
+  save(gse4581, file = "ExternalData/UAMS_GSE4581/gse4581.RData")
+}
+load("ExternalData/UAMS_GSE4581/gse4581.RData")
+
+if(!file.exists("ExternalData/MAQCII_GSE24080/gse24080.RData")){
+  gse24080 <- getGEO("GSE24080", GSEMatrix = TRUE,destdir = "ExternalData/MAQCII_GSE24080")[[1]]
+  save(gse24080,file = "ExternalData/MAQCII_GSE24080/gse24080.RData")
+}
+load("ExternalData/MAQCII_GSE24080/gse24080.RData")
+
+# Cross reference the IDs.
+meta_4581  <- pData(gse4581) %>%
+  mutate(
+    PatientID = gsub("U133Plus-","",title) %>% 
+                gsub(" \\(.*","",.) %>% 
+                gsub("-.*","",.)) 
+
+meta_24080 <- pData(gse24080) %>%
+  mutate(
+    PatientID = gsub("-.*","",title) %>%
+    sapply(.,function(i){
+      Str <- strsplit(i,split = "")[[1]]
+      
+      if (Str[2] == "0"){
+        out <- paste(Str[-2],collapse = "")
+      } else {
+        out <- paste(Str,collapse = "")
+      }
+      return(out)
+    }) %>% as.character())
+
+# Merge the two IDs.
+df_merg    <- left_join(select(meta_4581,PatientID,geo_accession),
+                        select(meta_24080,PatientID,geo_accession),
+                        by = "PatientID",suffix = c("_4581","_24080"))
+
+# Find the filenames matching. Note that only 408 of 414 had a match.
+all_files  <- list.files("ExternalData/MAQCII_GSE24080",pattern = "CEL.gz",full.names = T)
+files_zhan <- df_merg$geo_accession_24080 %>%
+  sapply(.,function(i){
+    tmp <- grep(pattern = i,x = all_files,value = T)
+    ifelse(all(is.na(tmp)),NA,tmp)
+  }) %>%
+  {.[!is.na(.)]}
+
+# Test that it is the same data!
+wh <- names(files_zhan) %>% sapply(.,function(i){which(i == df_merg$geo_accession_24080)})
+
+x1 <- log2(exprs(gse4581))[,df_merg$geo_accession_4581[wh]]
+x2 <- exprs(gse24080)[,df_merg$geo_accession_24080[wh]]
+
+cors <- mapply(function(a,b){
+  cor(x1[,a],x2[,b],use = "complete.obs")
+},a = colnames(x1),b = colnames(x2)) %>% `names<-`(colnames(x2))
+  
+boxplot(cors) # All but one sample have r > 0.9999
+
+# Remove the file with bad correlation.
+bad        <- names(which.min(cors))
+files_zhan <- files_zhan[!grepl(bad,files_zhan)]
+```
+
+Load the raw data from zhan et al. 2006.
+```{r}
+if(!file.exists("GeneratedData/Zhan_mas5.rds")){
+
+  # Read the CEL files into R.
+  zhan_data <- read.affybatch(files_zhan,compress = T)
+
+  # MAS5 normalization.
+  zhan_mas5 <- mas5(zhan_data)
+  
+  # Present/absent calls.
+  zhan_PA   <- mas5calls(zhan_data)
+  
+  # Save relevant data.
+  saveRDS(zhan_mas5,"GeneratedData/Zhan_mas5.rds")
+  saveRDS(zhan_PA,"GeneratedData/Zhan_PA.rds")
+}
+zhan_mas5 <- readRDS("GeneratedData/Zhan_mas5.rds")
+zhan_PA   <- readRDS("GeneratedData/Zhan_PA.rds")
+````
+
+Curate the metadata from Zhan et al. 2006.
+```{r}
+pheno.mm <- pData(gse4581)
+
+## Get treatment regime
+
+pheno.mm$regime <- "TT2"
+pheno.mm$regime[grep("TT3", pheno.mm$title)] <- "TT3"
+
+## Get the eventtime, event, and class phenotype and removing annoying extra chars
+
+pheno.mm$eventtime <- as.character(pheno.mm$characteristics_ch1.2)
+pheno.mm$eventtime <- sub("\\[SURTIM=", "", pheno.mm$eventtime)
+pheno.mm$eventtime <- as.numeric(lapply(strsplit(pheno.mm$eventtime, " "),
+                                        function(x){x[1]}))
+
+pheno.mm$event <- as.character(pheno.mm$characteristics_ch1)
+pheno.mm$event <- sub("\\[SURIND=", "", pheno.mm$event)
+pheno.mm$event <- as.numeric(lapply(strsplit(pheno.mm$event, " "),
+                                        function(x){x[1]}))
+
+pheno.mm$class <-  pData(gse4581)$characteristics_ch1.8
+pheno.mm$class <- sub("\\[Subgrp7=", "", pheno.mm$class)
+pheno.mm$class <- factor(sub("\\]", "", pheno.mm$class))
+pheno.mm$class.no <- as.numeric(pheno.mm$class) 
+
+pheno.mm$PatientID <- gsub("U133Plus-","",pheno.mm$title) %>% 
+                      gsub(" \\(.*","",.) %>% 
+                      gsub("-.*","",.)
+pheno.mm <- select(pheno.mm,PatientID,regime,eventtime,event,class,class.no)
+```
+
+Merge the phenodata with expression data, such that IDs match.
+```{r}
+CELtoPatientID <- pData(zhan_mas5) %>% rownames_to_column("CEL") %>%
+  mutate(
+    sample = gsub("-.*","",CEL) %>%
+    sapply(.,function(i){strsplit(i,split = "_")[[1]][2]}) %>%
+    sapply(.,function(i){
+      Str <- strsplit(i,split = "")[[1]]
+      
+      if (Str[2] == "0"){
+        out <- paste(Str[-2],collapse = "")
+      } else {
+        out <- paste(Str,collapse = "")
+      }
+      return(out)
+    }) %>% as.character())
+
+zhan_pheno <- left_join(x,pheno.mm,by = c("sample" = "PatientID")) %>% column_to_rownames("CEL")
+
+pData(zhan_mas5) <- zhan_pheno
+fData(zhan_mas5) <- fData(gse4581)
+```
+
+Now perform the filtering according to Zhan et al. 2006.
+```{r}
+# 1. Keep probesets called present in >3% of samples.---------------------------
+keeps <- exprs(zhan_PA) %>% 
+  apply(.,1,`==`,"P") %>% 
+  apply(.,2,function(x){sum(x) > floor(length(x)*0.03)})
+
+zhan_proc <- zhan_mas5[keeps,]
+
+# 2. log2 transform.------------------------------------------------------------
+exprs(zhan_proc) <- log2(exprs(zhan_proc))
+
+# 3. Retain only affymetrix probesets with a standard deviation > 1.34 in the training dataset.
+exprs.train <- exprs(zhan_proc[,zhan_proc$regime == "TT2"])
+keeps       <- apply(exprs.train,1,sd) > 1.34
+
+zhan_proc   <- zhan_proc[keeps,]
+
+# 4. For multiple affymetrix probesets matching the same gene, retain the one with highest variance.
+
+# Get the set of all gene symbols.
+geneIDs <- fData(zhan_proc)$`Gene Symbol` %>%
+  lapply(.,function(x){strsplit(x,split = " /// ")[[1]]}) %>%
+  unlist() %>%
+  unique()
+geneIDs <- unique(fData(zhan_proc)$`Gene Symbol`)
+
+# Go through each gene iteratively.
+tmp   <- fData(zhan_proc)$`Gene Symbol`
+keeps <- sapply(geneIDs,function(gene){
+  wh    <- which(tmp == gene)
+  x_sub <- exprs(zhan_proc)[wh,,drop = F]
+  names(which.max(apply(x_sub,1,sd)))
+})
+
+zhan_proc <- zhan_proc[keeps,]
+```
+
+Save the filtered data.
+```{r}
+saveRDS(zhan_proc,"GeneratedData/Zhan_filtered.rds")
+```
+
+# Check that the data is similar to GSE4581 
+
+```{r}
+wh_probes <- intersect(rownames(zhan_proc),rownames(gse4581))
+
+df_merg <- pData(zhan_proc) %>% rownames_to_column("CEL") %>%
+  left_join(.,meta_4581,by = c("sample" = "PatientID")) %>%
+  select(CEL,geo_accession,sample,title)
+
+cors <- sapply(1:nrow(df_merg),function(i){
+  cor(exprs(zhan_proc)[wh_probes,df_merg$CEL[i]],log2(exprs(gse4581)[wh_probes,df_merg$geo_accession[i]]),use = "complete.obs")
+})
+boxplot(cors)
+```
+
+# Hierarchical clustering 
+
+We try to cluster the data and cut at 7 groups to see if we get the same results as Zhan 2006.
+```{r}
+d <- dist(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
+
+clust <- hclust(d)
+
+labs <- cutree(clust,k = 7) %>% data.frame(clust = .)
+
+tmp <- merge(pData(zhan_proc),labs,by = 0)
+
+conf.GMM <- table(tmp$class.no,tmp$clust)
+
+# Reorder to get "diagonal" matrix
+conf.hclst <- conf.hclst[opt(conf.hclst), ]
+conf.hclst
+sum(diag(conf.hclst))/sum(conf.hclst)
+```
+
+# GMM clustering
+
+We try to cluster the data and cut at 7 groups to see if we get the same results as Zhan 2006.
+```{r}
+fit <- Mclust(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])),G = 7)
+
+labs <- fit$classification %>% data.frame(clust = .)
+
+tmp <- merge(pData(zhan_proc),labs,by = 0)
+
+conf.GMM <- table(tmp$class.no,tmp$clust)
+
+# Reorder to get "diagonal" matrix
+conf.GMM <- conf.GMM[opt(conf.GMM), ]
+conf.GMM
+sum(diag(conf.GMM))/sum(conf.GMM)
+```
+
