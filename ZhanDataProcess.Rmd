@@ -131,7 +131,7 @@ if(!file.exists("GeneratedData/Zhan_mas5.rds")){
 }
 zhan_mas5 <- readRDS("GeneratedData/Zhan_mas5.rds")
 zhan_PA   <- readRDS("GeneratedData/Zhan_PA.rds")
-````
+```
 
 Curate the metadata from Zhan et al. 2006.
 ```{r}
@@ -182,7 +182,7 @@ CELtoPatientID <- pData(zhan_mas5) %>% rownames_to_column("CEL") %>%
       return(out)
     }) %>% as.character())
 
-zhan_pheno <- left_join(x,pheno.mm,by = c("sample" = "PatientID")) %>% column_to_rownames("CEL")
+zhan_pheno <- left_join(CELtoPatientID,pheno.mm,by = c("sample" = "PatientID")) %>% column_to_rownames("CEL")
 
 pData(zhan_mas5) <- zhan_pheno
 fData(zhan_mas5) <- fData(gse4581)
@@ -194,7 +194,7 @@ Now perform the filtering according to Zhan et al. 2006.
 keeps <- exprs(zhan_PA) %>% 
   apply(.,1,`==`,"P") %>% 
   apply(.,2,function(x){sum(x) > floor(length(x)*0.03)})
-
+  
 zhan_proc <- zhan_mas5[keeps,]
 
 # 2. log2 transform.------------------------------------------------------------
@@ -248,22 +248,44 @@ boxplot(cors)
 
 # Hierarchical clustering 
 
+Centered correlation coefficient
+```{r}
+ccor <- function(x,y, offSet = "mean"){
+  if(!(offSet == "mean" | is.numeric(offSet))) stop("Offset must be mean or a number")
+  if(offSet == "mean"){
+    XoffSet <- mean(x)
+    YoffSet <- mean(y)
+  } else{
+    XoffSet <- YoffSet <- offSet
+  }
+  phiX <- sqrt(sum((x - XoffSet)^2) / length(x))
+  phiY <- sqrt(sum((y - YoffSet)^2) / length(y))
+  
+  mean(((x - XoffSet) / phiX) * ((y - YoffSet) / phiY))
+}
+ccor2 <- function(x, y) ccor(x,y, offSet = 0)
+```
+
+
 We try to cluster the data and cut at 7 groups to see if we get the same results as Zhan 2006.
 ```{r}
-d <- dist(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
+#d <- dist(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
+#d <- proxy::dist(exprs(zhan_proc[,zhan_proc$regime == "TT2"]), method = ccor2, by_rows = F)
+d <- as.dist(1- cor(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
 
-clust <- hclust(d)
+clust <- hclust(d, method = "ward.D2")
 
 labs <- cutree(clust,k = 7) %>% data.frame(clust = .)
 
 tmp <- merge(pData(zhan_proc),labs,by = 0)
 
-conf.GMM <- table(tmp$class.no,tmp$clust)
+conf.hclst <- table(tmp$class.no,tmp$clust)
 
 # Reorder to get "diagonal" matrix
 conf.hclst <- conf.hclst[opt(conf.hclst), ]
 conf.hclst
 sum(diag(conf.hclst))/sum(conf.hclst)
+plot(clust, label = F)
 ```
 
 # GMM clustering
