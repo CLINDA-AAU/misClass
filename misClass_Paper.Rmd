@@ -282,12 +282,21 @@ summarizeResults <- function(results, alpha, beta, digits){
 
 
 summarizeResultsCox <- function(results, HR = 2, digits = 2){
-  results <- exp(results)
   ## Bias
-  bias <- colMeans(results - HR, na.rm = TRUE)
+  bias <- colMeans(exp(results[,c("True", "Naive", "Simex")]) - HR, na.rm = TRUE)
   ## MSE
-  mse <- colMeans((results - HR)^2, na.rm = TRUE)
-  return(round(rbind(bias,mse), digits))
+  mse <- colMeans((exp(results[,c("True", "Naive", "Simex")]) - HR)^2, na.rm = TRUE)
+  ## Coverage
+  meanNA <- function(x) mean(x, na.rm = T)
+  confint <- cbind(log(HR),
+                   results[,c("True")]-1.96*results[,c("True.sd")],
+                   results[,c("True")]+1.96*results[,c("True.sd")],
+                   results[,c("Naive")]-1.96*results[,c("Naive.sd")],
+                   results[,c("Naive")]+1.96*results[,c("Naive.sd")],
+                   results[,c("Simex")]-1.96*results[,c("Simex.sd")],
+                   results[,c("Simex")]+1.96*results[,c("Simex.sd")])
+  coverage <- apply(t(apply(confint, 1, ind)), 2, meanNA)
+  return(round(rbind(bias, mse, coverage), digits))
 }
 
 bootConf <- function(n.boot, data, orig.class, method = "GMM"){
@@ -397,7 +406,7 @@ if(!file.exists("GeneratedData/sim_results_binom.RData") || rerun){
     }
   }
   save(simResults, file = "GeneratedData/sim_results_binom.RData")
-  
+  stopImplicitCluster()
 }
 ```
 
@@ -457,8 +466,6 @@ tUbal <- Hmisc::latex(unbalanced[,-1],
 
 ## Survival outcome
 Now we want to see if how MCSIMEX works with survival data. We generate $n = 200$, $n = 500$ or $n = 1000$ training datapoints from two classes using a binomal distribution with parameter $\pi = 0.5$ and add noise to get misclassification probabilities of $0.1$, $0.2$ or $0.3$ for both classes. The outcome is assumed to be exponentially distributed with rate $\beta*(1+\mbox{class})$ and the censoring time exponentially distributed with reate 0.5. We estimate the hazard ratio of the two classes using the true classlabels, the misspecified classlabels, and the simex corrected hazard ratio using a misclassificationsmatrix with the true misclassification rates. 
-
-
 ```{r}
 rerun <- TRUE
 
@@ -489,8 +496,12 @@ simFuncCox <- function(n = 1000, mp = 0.3){
                          asymptotic = FALSE)
   results <- c(coefficients(model.true),
            coefficients(model.naive),
-           model.simex$coefficients)
-  names(results) <- c("True", "Naive", "Simex")
+           model.simex$coefficients,
+           sqrt(vcov(model.true)),
+           sqrt(vcov(model.naive)),
+           sqrt(model.simex$variance.jackknife))
+  names(results) <- c("True", "Naive", "Simex",
+                      "True.sd", "Naive.sd", "Simex.sd")
   
   return(results)
 }
@@ -511,7 +522,10 @@ if(!file.exists("GeneratedData/sim_results_cox.RData") || rerun){
                 }
     }
   }
+  stopImplicitCluster()
   save(simResultsCox, file = "GeneratedData/sim_results_cox.RData")
+} else{
+  load("GeneratedData/sim_results_cox.RData")
 }
 ```
 
@@ -533,10 +547,10 @@ tCox <- Hmisc::latex(coxTable[,-1],
              cgroup = c("mp = 0.1", "mp = 0.2","mp = 0.3"),
              n.cgroup = c(3,3,3),
              rgroup = c(200,500,1000),
-             n.rgroup = c(2,2,2),
+             n.rgroup = c(3,3,3),
              file = "Output/Tables/cox.tex",
              colheads = c(rep(c("True", "Naive","Simex"),3)),
-             caption = "Results from cox simulations",
+             caption = "Results from cox estimation of 1000 simulations using a misclassification probability (mp) of 0.1, 0.2 or 0.3",
              label = "simResults:cox"
            )
 ```
@@ -756,16 +770,16 @@ boxplot(cors)
 We try to cluster the data and cut at 7 groups to see if we get the same results as Zhan 2006.
 ```{r}
 #d <- dist(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
-d <- #as.dist(1- cor(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
+#d <- as.dist(1- cor(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
 d <- 1-proxy::dist(exprs(zhan_proc[,zhan_proc$regime == "TT2"]), method = ucor, by_rows = F)
 
-clust <- hclust(d, method = "ward.D")
+clust <- hclust(d, method = "ward")
 
 labs <- cutree(clust,k = 7) %>% data.frame(clust = .)
 
 tmp <- merge(pData(zhan_proc),labs,by = 0)
 
-conf.hclst <- table(tmp$class.no,tmp$clust)
+conf.hclst <- table(tmp$class,tmp$clust)
 
 # Reorder to get "diagonal" matrix
 conf.hclst <- conf.hclst[opt(conf.hclst), ]
@@ -783,7 +797,7 @@ labs <- fit.GMM$classification %>% data.frame(clust = .)
 
 tmp <- merge(pData(zhan_proc),labs,by = 0)
 
-conf.GMM <- table(tmp$class.no,tmp$clust)
+conf.GMM <- table(tmp$class,tmp$clust)
 
 # Reorder to get "diagonal" matrix
 conf.GMM <- conf.GMM[opt(conf.GMM), ]
@@ -811,7 +825,8 @@ if(!file.exists("GeneratedData/boots.GMM.RData")){
              orig.class = ct,
              method = "GMM")
   }
-  save(r.boot, file = "GeneratedData/boots.RData")
+  save(r.boot, file = "GeneratedData/boots.GMM.RData")
+  stopImplicitCluster()
 } else load("GeneratedData/boots.GMM.RData")
 
 ## Build hatPi matrix from bootstraps
