@@ -143,9 +143,9 @@ ind <- function(x){
 }
 
 # Function for simulating survival data.
-my.sim <- function(n){
+my.sim <- function(n, mp = 0.3){
   X1 <- rbinom(n, size = 1, p = 0.5) 
-  X2 <- 2*rbinom(n, size = 1, p = 0.3) + X1
+  X2 <- 2*rbinom(n, size = 1, p = mp) + X1
   X2 <- case_when(X2 == 0 ~ 0,
             X2 == 1 ~ 1,
             X2 == 2 ~ 1,
@@ -280,6 +280,16 @@ summarizeResults <- function(results, alpha, beta, digits){
   return(round(rbind(bias.a,bias.b,mse.a,mse.b,coverage.a,coverage.b), digits))
 }
 
+
+summarizeResultsCox <- function(results, HR = 2, digits = 2){
+  results <- exp(results)
+  ## Bias
+  bias <- colMeans(results - HR, na.rm = TRUE)
+  ## MSE
+  mse <- colMeans((results - HR)^2, na.rm = TRUE)
+  return(round(rbind(bias,mse), digits))
+}
+
 bootConf <- function(n.boot, data, orig.class, method = "GMM"){
   boot = sort(sample(1:n, size = n.boot, replace = FALSE))
   bag = data[boot,]
@@ -350,9 +360,6 @@ plot(feature[, 1], feature[, 2], col = ccol, pch = 16,
 Obviously, a number of observations will be mis-classfied, so by simulation we investigate the performace of the MC-SIMEX procedure. A range of scenarios similar to the one described above was tested by varying both the number of training data pairs $n = (200, 500, 1000)$ and the class probability $\pi_0 = (0.2, 0.5)$ . Each scenario was repeated 1000 times to calculate the mis-classification matrix by monte carlo simulation. We performed unsupervised clustering with GMM and Kmeans.
 
 ```{r simulation, echo = FALSE}
-# Set up parallel computations
-registerDoParallel(cores = 30)
-registerDoRNG(seed = 123)
 rerun <- FALSE
 
 # Number of simulated experiments
@@ -366,6 +373,10 @@ simResults <- list()
 parPackages <- c("simex", "mixtools", "mclust", "arrangements")
 
 if(!file.exists("GeneratedData/sim_results_binom.RData") || rerun){
+  # Set up parallel computations
+  registerDoParallel(cores = 30)
+  registerDoRNG(seed = 123)
+
   for(meth in method){
     for(classProb in probs){
       for(sampleSize in nSample){
@@ -386,6 +397,7 @@ if(!file.exists("GeneratedData/sim_results_binom.RData") || rerun){
     }
   }
   save(simResults, file = "GeneratedData/sim_results_binom.RData")
+  
 }
 ```
 
@@ -444,58 +456,93 @@ tUbal <- Hmisc::latex(unbalanced[,-1],
 
 
 ## Survival outcome
-Now we want to see if how MCSIMEX works with survival data. We generate $n = 1000$ independent training data pairs from a Gaussian mixture model, where the prior probabilities of classes 0 and 1 are $\pi_0 = 5/10$ and $\pi_1 = 5/10$ respectively; class 0 and 1 observations have bivariate normal distributions with means $\mu_0=(-1, 0)$ and $\mu_1=(1, 0)$ respectively, and common identity covariance matrix. The outcome is assumed to be exponentially distributed with rate $\beta*(1+\mbox{class})$ and the censoring time exponentially distributed with reate 0.5. Mis-classification rate is 0.3, see the my.sim function.  
+Now we want to see if how MCSIMEX works with survival data. We generate $n = 200$, $n = 500$ or $n = 1000$ training datapoints from two classes using a binomal distribution with parameter $\pi = 0.5$ and add noise to get misclassification probabilities of $0.1$, $0.2$ or $0.3$ for both classes. The outcome is assumed to be exponentially distributed with rate $\beta*(1+\mbox{class})$ and the censoring time exponentially distributed with reate 0.5. We estimate the hazard ratio of the two classes using the true classlabels, the misspecified classlabels, and the simex corrected hazard ratio using a misclassificationsmatrix with the true misclassification rates. 
 
-The naive model is for each timepoint estimated by a glm with identity link and Gaussian distribution (just the ordinary linear model) with pseudo observations as outcome and class as predictor. The fitted  generalized linear model has undergone the MC-SIMEX procedure for error correction. Ideally, this should be carried out with gee (e.g. the geese package) and cloglog as link function. I have tried, but it does not straightforwardly work with the simex package. I have compared the results from glm and gee and it is really similar, at least in this setting.
 
-We see clearly an attenuation under mislabeling, and considerable improvement under the MC-SIMEX approach.
+```{r}
+rerun <- TRUE
 
-This based on random mislabeling and NOT on unsupervised clustering. Maybe this should be changed, but on the other hand pseudo-values in this context is also pretty new.
+# Simulated experiments
+nSim <- 1000
+nSample <- c(200,500,1000)
+mpList  <- c(0.1, 0.2, 0.3)
 
-```{r survival, echo = FALSE}
- 
-d = my.sim(1000)
-plot(survfit(Surv(d$time,d$status) ~ d$X2)) 
-legend("topright", c("Truth", "KM", "Naive", "MC-SIMEX"), lty = c(1,1,1,1),
-       col = c("Blue", "Black", "Red", "Green"), bty = "n")
-x = 0:50/25
-lines(x, exp(-1*x), col = "blue")
-lines(x, exp(-2*x), col = "blue")
-
-f=prodlim(Hist(time,status)~1,data=d)
-j=jackknife(f,times = 0:50/25)
-
-hatPi = matrix(c(0.7, 0.3, 0.3, 0.7), nrow = 2, byrow = T) # We use here the truth
-colnames(hatPi) <- levels(factor(d$X1))
-rownames(hatPi) <- levels(factor(d$X1))
-
-res.surv = matrix(0, nrow = 51, ncol = 4)
-
-if(!file.exists("GeneratedData/results_survival.RData")){
-for(i in 1:51){
-  print(i)
-  y = j[,i]
-  fit.glm = glm(y~X2, family = gaussian(link = "identity"), data = d, 
-                x = T, y = T) # Maybe my own cloglog-link
-  fit.mcsimex = mcsimex(fit.glm, SIMEXvariable = "X2", mc.matrix = hatPi, B = 400)
-  res.surv[i,c(1,2)] = predict(fit.glm, type = "response", newdata = data.frame(X2=factor(c(0,1))))
-  res.surv[i,c(3,4)] = predict(fit.mcsimex, type = "response", newdata = data.frame(X2=factor(c(0,1))))
+# Function to parallelize
+simFuncCox <- function(n = 1000, mp = 0.3){
+  d = my.sim(n = n, mp = mp)
+  
+  hatPi = matrix(c(1-mp, mp, mp, 1-mp), nrow = 2, byrow = T) # We use here the truth
+  colnames(hatPi) <- levels(factor(d$X1))
+  rownames(hatPi) <- levels(factor(d$X1))
+  
+  d$surv <- Surv(d$time,d$status)
+  model.true  <- coxph(surv ~ X1,
+                 data  = d)
+  
+  model.naive <- coxph(surv ~ X2,
+                 data  = d,
+                 model = TRUE)
+  
+  model.simex <- mcsimex(model = model.naive,
+                         SIMEXvariable = "X2",
+                         mc.matrix = hatPi,
+                         asymptotic = FALSE)
+  results <- c(coefficients(model.true),
+           coefficients(model.naive),
+           model.simex$coefficients)
+  names(results) <- c("True", "Naive", "Simex")
+  
+  return(results)
 }
-  save(res.surv, file = "GeneratedData/results_survival.RData")
+
+if(!file.exists("GeneratedData/sim_results_cox.RData") || rerun){
+  simResultsCox <- list()
+  registerDoParallel(cores = 30)
+  registerDoRNG(seed = 123)
+  
+  for(mp in mpList){
+    for(sampleSize in nSample){
+      simResultsCox[[paste(mp)]][[paste(sampleSize)]] <-
+        foreach(i=1:nSim,
+                .combine = "rbind",
+                .errorhandling = "pass",
+                .packages = parPackages) %dopar% {
+                  simFuncCox(n = sampleSize, mp = mp)
+                }
+    }
+  }
+  save(simResultsCox, file = "GeneratedData/sim_results_cox.RData")
 }
+```
 
-load("GeneratedData/results_survival.RData")
+Summarize results
+```{r}
+coxTable <- lapply(simResultsCox, function(x) lapply(x, summarizeResultsCox))
+coxTable <- cbind(rep(nSample, each = 2),
+            do.call(rbind, coxTable[["0.1"]]),
+            do.call(rbind, coxTable[["0.2"]]),
+            do.call(rbind, coxTable[["0.3"]])
+)
+kable(coxTable)
+```
 
-lines(x,res.surv[,1],col = "red")
-lines(x,res.surv[,2],col = "red")
-lines(x,res.surv[,3],col = "green")
-lines(x,res.surv[,4],col = "green")
-
+```{r, echo = FALSE, warning = FALSE}
+## Create Latex tables
+tCox <- Hmisc::latex(coxTable[,-1],
+             title = "",
+             cgroup = c("mp = 0.1", "mp = 0.2","mp = 0.3"),
+             n.cgroup = c(3,3,3),
+             rgroup = c(200,500,1000),
+             n.rgroup = c(2,2,2),
+             file = "Output/Tables/cox.tex",
+             colheads = c(rep(c("True", "Naive","Simex"),3)),
+             caption = "Results from cox simulations",
+             label = "simResults:cox"
+           )
 ```
 
 # Cancer subclassification
-Load and data management of multiple myeloma data, GES4581
-Download the raw .CEL files from Zhan et al. 2006. and extract them. The raw CEL files are available from a later study and stored in GEO repositoty GSE24080.
+Load and data management of multiple myeloma data, GES4581. The raw CEL files are available from a later study and stored in GEO repositoty GSE24080, so we download these and use metadata from the two studys to match them by patientID.
 ```{r}
 if(!file.exists("ExternalData/MAQCII_GSE24080/download.done")){
   getGEOSuppFiles("GSE24080",baseDir = "ExternalData/MAQCII_GSE24080",makeDirectory = FALSE)
@@ -730,9 +777,9 @@ plot(clust, label = F)
 # GMM clustering
 We try to cluster the data and cut at 7 groups to see if we get the same results as Zhan 2006.
 ```{r}
-fit <- Mclust(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])),G = 7)
+fit.GMM <- Mclust(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])),G = 7)
 
-labs <- fit$classification %>% data.frame(clust = .)
+labs <- fit.GMM$classification %>% data.frame(clust = .)
 
 tmp <- merge(pData(zhan_proc),labs,by = 0)
 
@@ -744,4 +791,56 @@ conf.GMM
 sum(diag(conf.GMM))/sum(conf.GMM)
 ```
 
+Bootstrap misclassification matrix
+```{r}
+# Misclaffification matrix
+ct <- fit.GMM$classification
+
+# 0.632 bootstrap
+n = nrow(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
+n.boot = round((1-1/exp(1))*n)
+
+if(!file.exists("GeneratedData/boots.GMM.RData")){
+  # Set up parallel computations
+  registerDoParallel(cores = 30)
+  registerDoRNG(seed = 321)
+  
+  r.boot <- foreach(i=1:100, .combine = "+")  %dopar% {
+    bootConf(n.boot = n.boot,
+             data = t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])),
+             orig.class = ct,
+             method = "GMM")
+  }
+  save(r.boot, file = "GeneratedData/boots.RData")
+} else load("GeneratedData/boots.GMM.RData")
+
+## Build hatPi matrix from bootstraps
+hatPi <- sweep(r.boot, MARGIN = 2, FUN="/", STATS=colSums(r.boot))
+rownames(hatPi) <- 1:7 #Only rename rows, columns are original classes and seem okay
+xhatPi <- build.mc.matrix(as.matrix(hatPi))
+kable(round(hatPi*100),
+      caption = "Bootstrapped misclassification with GMM",
+      row.names = T)
+```
+
+Fit cox model
+```{r}
+newClass <- data.frame(newClass = factor(fit.GMM$classification))
+row.names(newClass) <- gsub("U133Plus-","",row.names(newClass)) %>% 
+  gsub(" \\(.*","",.) %>% 
+  gsub("-.*","",.) %>%
+  gsub("P0","P",.) %>%
+  strsplit(., "_") %>%
+  sapply(., "[", 2)
+
+pheno.mm2 <- merge(pheno.mm, newClass, by.x = "PatientID", by.y = 0, all.x = T)
+pheno.mm2$surv <- with(pheno.mm2, Surv(eventtime, event))
+
+model <- coxph(surv ~ newClass, data = pheno.mm2, model = T)
+
+model.simex <- mcsimex(model,
+                       SIMEXvariable = "newClass",
+                       mc.matrix = xhatPi,
+                       asymptotic = F)
+```
 
