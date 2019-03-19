@@ -3,7 +3,9 @@ title: Regression modelling based on imperfect labels arising from unsupervised 
   by Gaussian mixture models
 author: "Rasmus Brøndum, Thomas Yssing Michalsen & Martin Bøgsted"
 date: "13 3 2019"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 ```{r setup, include=FALSE, echo = FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -537,7 +539,7 @@ coxTable <- cbind(rep(nSample, each = 3),
             do.call(rbind, coxTable[["0.2"]]),
             do.call(rbind, coxTable[["0.3"]])
 )
-kable(coxTable)
+kable(coxTable, caption = "Simulation results with Cox for misclassification probability of 0.1, 0.2 or 0.3")
 ```
 
 ```{r, echo = FALSE, warning = FALSE}
@@ -843,7 +845,7 @@ arrange_ggsurvplots(list(plot1, plot2))
 
 
 ## Cox regression in cancer data
-Define low and high risk groups and do cox regression
+Define low and high risk groups and do cox regression in training data
 ```{r}
 tmp$zhan.risk <- factor(ifelse(tmp$class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
                             levels = c("Low Risk", "High Risk"))
@@ -853,7 +855,6 @@ tmp$gmm.risk <- factor(ifelse(tmp$gmm.class %in% c("PR", "MF", "MS"), "High Risk
 coxph(OS~zhan.risk, data = tmp)
 coxph(OS~gmm.risk, data = tmp)
 ```
-
 
 Bootstrap misclassification matrix
 ```{r}
@@ -907,10 +908,28 @@ kable(smallXhatPi)
 Then we fit the cox model and do SIMEX correction.
 ```{r}
 cox.gmm  <- coxph(OS~gmm.risk, model = TRUE, data = tmp)
-mcsimex(cox.gmm,
-        SIMEXvariable = "gmm.risk",
-        mc.matrix = smallXhatPi,
-        asymptotic = FALSE)
+cox.gmm.simex <- mcsimex(cox.gmm,
+                         SIMEXvariable = "gmm.risk",
+                         mc.matrix = smallXhatPi,
+                         asymptotic = FALSE)
+```
+
+
+```{r}
+## Build results matrix
+cox.gmm.sum <- summary(cox.gmm)
+results <- matrix(0, nrow = 2, ncol = 3)
+results[1,1] <- cox.gmm.sum$coefficients[2]
+results[1,2] <- cox.gmm.sum$conf.int[3]
+results[1,3] <- cox.gmm.sum$conf.int[4]
+
+results[2,1] <- exp(cox.gmm.simex$coefficients)
+results[2,2] <- exp(cox.gmm.simex$coefficients -1.96 * sqrt(cox.gmm.simex$variance.jackknife))
+results[2,3] <- exp(cox.gmm.simex$coefficients +1.96 * sqrt(cox.gmm.simex$variance.jackknife))
+row.names(results) <- c("Naive", "Simex")
+colnames(results)  <- c("HR", "Lower 95", "Upper 95")
+kable(results, digits = 2,
+      caption = "Hazard ratio of high vs low risk with the naive and simex corrected model")
 ```
 
 
