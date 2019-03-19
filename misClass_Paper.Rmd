@@ -464,10 +464,10 @@ tUbal <- Hmisc::latex(unbalanced[,-1],
 ```
 
 
-## Survival outcome
+# Survival outcome
 Now we want to see if how MCSIMEX works with survival data. We generate $n = 200$, $n = 500$ or $n = 1000$ training datapoints from two classes using a binomal distribution with parameter $\pi = 0.5$ and add noise to get misclassification probabilities of $0.1$, $0.2$ or $0.3$ for both classes. The outcome is assumed to be exponentially distributed with rate $\beta*(1+\mbox{class})$ and the censoring time exponentially distributed with reate 0.5. We estimate the hazard ratio of the two classes using the true classlabels, the misspecified classlabels, and the simex corrected hazard ratio using a misclassificationsmatrix with the true misclassification rates. 
 ```{r}
-rerun <- TRUE
+rerun <- FALSE
 
 # Simulated experiments
 nSim <- 1000
@@ -532,7 +532,7 @@ if(!file.exists("GeneratedData/sim_results_cox.RData") || rerun){
 Summarize results
 ```{r}
 coxTable <- lapply(simResultsCox, function(x) lapply(x, summarizeResultsCox))
-coxTable <- cbind(rep(nSample, each = 2),
+coxTable <- cbind(rep(nSample, each = 3),
             do.call(rbind, coxTable[["0.1"]]),
             do.call(rbind, coxTable[["0.2"]]),
             do.call(rbind, coxTable[["0.3"]])
@@ -766,14 +766,14 @@ cors <- sapply(1:nrow(df_merg),function(i){
 boxplot(cors)
 ```
 
-# Hierarchical clustering 
+## Hierarchical clustering 
 We try to cluster the data and cut at 7 groups to see if we get the same results as Zhan 2006.
 ```{r}
 #d <- dist(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
 #d <- as.dist(1- cor(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
 d <- 1-proxy::dist(exprs(zhan_proc[,zhan_proc$regime == "TT2"]), method = ucor, by_rows = F)
 
-clust <- hclust(d, method = "ward")
+clust <- hclust(d, method = "ward.D")
 
 labs <- cutree(clust,k = 7) %>% data.frame(clust = .)
 
@@ -788,13 +788,11 @@ sum(diag(conf.hclst))/sum(conf.hclst)
 plot(clust, label = F)
 ```
 
-# GMM clustering
+## GMM clustering
 We try to cluster the data and cut at 7 groups to see if we get the same results as Zhan 2006.
 ```{r}
 fit.GMM <- Mclust(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])),G = 7)
-
 labs <- fit.GMM$classification %>% data.frame(clust = .)
-
 tmp <- merge(pData(zhan_proc),labs,by = 0)
 
 conf.GMM <- table(tmp$class,tmp$clust)
@@ -805,10 +803,62 @@ conf.GMM
 sum(diag(conf.GMM))/sum(conf.GMM)
 ```
 
+Plot survival curves for fitted groups
+```{r}
+### Use most likely groups from confusion matrix
+tmp$gmm.class <- row.names(conf.GMM)[tmp$clust]
+table(tmp$class, tmp$gmm.class)
+
+tmp$OS <- Surv(tmp$eventtime,tmp$event)
+fit1 <- survfit(tmp$OS~tmp$class)
+fit2 <- survfit(tmp$OS~tmp$gmm.class)
+names(fit1$strata) <- gsub("class=", "", names(fit1$strata))
+names(fit2$strata) <- gsub("gmm.class=", "", names(fit2$strata))
+plot1 <- ggsurvplot(fit1, data = tmp, title = "Zhan Classes")
+plot2 <- ggsurvplot(fit2, data = tmp, title = "GMM Classes")
+arrange_ggsurvplots(list(plot1, plot2))
+```
+
+Try in test data
+```{r}
+test.labs <- predict(fit.GMM, t(exprs(zhan_proc[,zhan_proc$regime == "TT3"])))
+test.labs2 <- data.frame("clust" = test.labs$classification)
+row.names(test.labs2) <- row.names(test.labs$z)
+tmp.test <- merge(pData(zhan_proc),test.labs2,by = 0)
+tmp.test$gmm.class <- row.names(conf.GMM)[tmp.test$clust]
+table(tmp.test$class, tmp.test$gmm.class)
+```
+
+KM plots in test data
+```{r}
+tmp.test$OS <- Surv(tmp.test$eventtime,tmp.test$event)
+fit1 <- survfit(tmp.test$OS~tmp.test$class)
+fit2 <- survfit(tmp.test$OS~tmp.test$gmm.class)
+names(fit1$strata) <- gsub("class=", "", names(fit1$strata))
+names(fit2$strata) <- gsub("gmm.class=", "", names(fit2$strata))
+plot1 <- ggsurvplot(fit1, data = tmp.test, title = "Zhan Classes (Test data)")
+plot2 <- ggsurvplot(fit2, data = tmp.test, title = "GMM Classes (Test data)")
+arrange_ggsurvplots(list(plot1, plot2))
+```
+
+
+## Cox regression in cancer data
+Define low and high risk groups and do cox regression
+```{r}
+tmp$zhan.risk <- factor(ifelse(tmp$class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
+                            levels = c("Low Risk", "High Risk"))
+tmp$gmm.risk <- factor(ifelse(tmp$gmm.class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
+                           levels = c("Low Risk", "High Risk"))
+
+coxph(OS~zhan.risk, data = tmp)
+coxph(OS~gmm.risk, data = tmp)
+```
+
+
 Bootstrap misclassification matrix
 ```{r}
 # Misclaffification matrix
-ct <- fit.GMM$classification
+ct <- tmp$gmm.class
 
 # 0.632 bootstrap
 n = nrow(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
@@ -831,15 +881,41 @@ if(!file.exists("GeneratedData/boots.GMM.RData")){
 
 ## Build hatPi matrix from bootstraps
 hatPi <- sweep(r.boot, MARGIN = 2, FUN="/", STATS=colSums(r.boot))
-rownames(hatPi) <- 1:7 #Only rename rows, columns are original classes and seem okay
+rownames(hatPi) <- colnames(hatPi) #Only rename rows, columns are original classes and seem okay
 xhatPi <- build.mc.matrix(as.matrix(hatPi))
 kable(round(hatPi*100),
       caption = "Bootstrapped misclassification with GMM",
       row.names = T)
 ```
 
-Fit cox model
+Fit cox model of low vs highrisk. First we build a misclassification matrix with only two classes
 ```{r}
+## Construct 2x2 misclassification matrix
+high <- which(colnames(xhatPi) %in% c("PR", "MF", "MS"))
+
+smallXhatPi <- matrix(data = c(sum(r.boot[-high,-high]),
+                               sum(r.boot[-high,high]),
+                               sum(r.boot[high,-high]),
+                               sum(r.boot[high,high])),
+                               ncol = 2, nrow = 2, byrow = T)
+
+smallXhatPi <- sweep(smallXhatPi, MARGIN = 2, FUN="/", STATS=colSums(smallXhatPi))
+row.names(smallXhatPi) <- colnames(smallXhatPi) <- c("Low Risk", "High Risk")
+kable(smallXhatPi)
+```
+
+Then we fit the cox model and do SIMEX correction.
+```{r}
+cox.gmm  <- coxph(OS~gmm.risk, model = TRUE, data = tmp)
+mcsimex(cox.gmm,
+        SIMEXvariable = "gmm.risk",
+        mc.matrix = smallXhatPi,
+        asymptotic = FALSE)
+```
+
+
+```{r, echo = FALSE, eval = FALSE}
+# chunk disabled
 newClass <- data.frame(newClass = factor(fit.GMM$classification))
 row.names(newClass) <- gsub("U133Plus-","",row.names(newClass)) %>% 
   gsub(" \\(.*","",.) %>% 
