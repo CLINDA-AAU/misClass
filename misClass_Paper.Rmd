@@ -9,6 +9,7 @@ output:
 ---
 ```{r setup, include=FALSE, echo = FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+knitr::knit_engines$set(python = reticulate::eng_python)
 
 # Install simex package with cox
 #devtools::install_github("https://github.com/HaemAalborg/simex", force = T)
@@ -19,7 +20,6 @@ library(dplyr, quietly = T)
 library(mclust, quietly = T)
 library(mixtools, quietly = T)
 library(simex, quietly = T)
-library(prodlim, quietly = T)
 library(survival, quietly = T)
 library(arrangements, quietly = T)
 library(foreach)
@@ -27,7 +27,6 @@ library(doParallel)
 library(doRNG)
 library(Hmisc)
 library(survminer)
-library(ggdendro)
 library(magrittr)
 library(tidyverse)
 
@@ -789,6 +788,38 @@ conf.hclst
 sum(diag(conf.hclst))/sum(conf.hclst)
 plot(clust, label = F)
 ```
+
+### Python
+```{r}
+library(reticulate)
+pyData <- exprs(zhan_proc[,zhan_proc$regime == "TT2"])
+use_python("/usr/bin/python3", required = T)
+
+import("Bio")
+py_run_string("from Bio.Cluster import treecluster")
+## Use the bioPython library to do pairwise centroid-linkage clustering (method = c) 
+## One the columns of the GEP matrix (transpose = 1), with 
+## The centered correlation measure for distance (dist = c)
+py_run_string("tree = treecluster(data = r.pyData, method = 'c', dist = 'c', transpose = 1)")
+py_run_string("clusterid = tree.cut(nclusters = 7)")
+```
+
+Compare classes
+```{r}
+labs.py <- py$clusterid
+names(labs.py) <- colnames(pyData)
+labs.py <- data.frame(labs.py)
+
+tmp.py <- merge(pData(zhan_proc), labs.py, by = 0)
+
+conf.hclst.py <- table(tmp.py$class, tmp.py$labs.py)
+
+# Reorder to get "diagonal" matrix
+conf.hclst.py <- conf.hclst.py[opt(conf.hclst.py), ]
+conf.hclst.py
+sum(diag(conf.hclst.py))/sum(conf.hclst.py)
+```
+
 
 ## GMM clustering
 We try to cluster the data and cut at 7 groups to see if we get the same results as Zhan 2006.
