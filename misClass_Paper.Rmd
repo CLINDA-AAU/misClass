@@ -29,6 +29,7 @@ library(Hmisc)
 library(survminer)
 library(magrittr)
 library(tidyverse)
+library(kableExtra)
 
 # Packages from Bioconductor
 library(Biobase)
@@ -538,7 +539,7 @@ coxTable <- cbind(rep(nSample, each = 3),
             do.call(rbind, coxTable[["0.2"]]),
             do.call(rbind, coxTable[["0.3"]])
 )
-kable(coxTable, caption = "Simulation results with Cox for misclassification probability of 0.1, 0.2 or 0.3")
+kable(coxTable, caption = "Simulation results with Cox for misclassification probability of 0.1, 0.2 or 0.3") %>% add_header_above(c(" " = 2, "0.1" = 3, "0.2" = 3, "0.3" = 3))
 ```
 
 ```{r, echo = FALSE, warning = FALSE}
@@ -847,8 +848,8 @@ fit1 <- survfit(tmp$OS~tmp$class)
 fit2 <- survfit(tmp$OS~tmp$gmm.class)
 names(fit1$strata) <- gsub("class=", "", names(fit1$strata))
 names(fit2$strata) <- gsub("gmm.class=", "", names(fit2$strata))
-plot1 <- ggsurvplot(fit1, data = tmp, title = "Zhan Classes")
-plot2 <- ggsurvplot(fit2, data = tmp, title = "GMM Classes")
+plot1 <- ggsurvplot(fit1, data = tmp, title = "Zhan Classes", pval = T)
+plot2 <- ggsurvplot(fit2, data = tmp, title = "GMM Classes", pval = T)
 arrange_ggsurvplots(list(plot1, plot2))
 ```
 
@@ -869,8 +870,8 @@ fit1 <- survfit(tmp.test$OS~tmp.test$class)
 fit2 <- survfit(tmp.test$OS~tmp.test$gmm.class)
 names(fit1$strata) <- gsub("class=", "", names(fit1$strata))
 names(fit2$strata) <- gsub("gmm.class=", "", names(fit2$strata))
-plot1 <- ggsurvplot(fit1, data = tmp.test, title = "Zhan Classes (Test data)")
-plot2 <- ggsurvplot(fit2, data = tmp.test, title = "GMM Classes (Test data)")
+plot1 <- ggsurvplot(fit1, data = tmp.test, title = "Zhan Classes (Test data)", pval = T)
+plot2 <- ggsurvplot(fit2, data = tmp.test, title = "GMM Classes (Test data)", pval = T)
 arrange_ggsurvplots(list(plot1, plot2))
 ```
 
@@ -885,6 +886,40 @@ tmp$gmm.risk <- factor(ifelse(tmp$gmm.class %in% c("PR", "MF", "MS"), "High Risk
 
 coxph(OS~zhan.risk, data = tmp)
 coxph(OS~gmm.risk, data = tmp)
+```
+
+Kaplan-Meier plot for low vs high risk
+```{r}
+fit1 <- survfit(tmp$OS~tmp$zhan.risk)
+fit2 <- survfit(tmp$OS~tmp$gmm.risk)
+names(fit1$strata) <- gsub("zhan.risk=", "", names(fit1$strata))
+names(fit2$strata) <- gsub("gmm.risk=", "", names(fit2$strata))
+plot1 <- ggsurvplot(fit1, data = tmp, title = "Zhan Risk Class", pval = T)
+plot2 <- ggsurvplot(fit2, data = tmp, title = "GMM Risk Class", pval = T)
+arrange_ggsurvplots(list(plot1, plot2))
+```
+
+
+Try in test data
+```{r}
+tmp.test$zhan.risk <- factor(ifelse(tmp.test$class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
+                            levels = c("Low Risk", "High Risk"))
+tmp.test$gmm.risk <- factor(ifelse(tmp.test$gmm.class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
+                           levels = c("Low Risk", "High Risk"))
+
+coxph(OS~zhan.risk, data = tmp.test)
+coxph(OS~gmm.risk, data = tmp.test)
+```
+
+Kaplan-Meier plot for low vs high risk
+```{r}
+fit1 <- survfit(tmp.test$OS~tmp.test$zhan.risk)
+fit2 <- survfit(tmp.test$OS~tmp.test$gmm.risk)
+names(fit1$strata) <- gsub("zhan.risk=", "", names(fit1$strata))
+names(fit2$strata) <- gsub("gmm.risk=", "", names(fit2$strata))
+plot1 <- ggsurvplot(fit1, data = tmp.test, title = "Zhan Risk Class (test data)", pval = T)
+plot2 <- ggsurvplot(fit2, data = tmp.test, title = "GMM Risk Class (test data)", pval = T)
+arrange_ggsurvplots(list(plot1, plot2))
 ```
 
 Bootstrap misclassification matrix
@@ -964,24 +999,35 @@ kable(results, digits = 2,
 ```
 
 
-```{r, echo = FALSE, eval = FALSE}
+```{r, echo = T, eval = T}
 # chunk disabled
-newClass <- data.frame(newClass = factor(fit.GMM$classification))
-row.names(newClass) <- gsub("U133Plus-","",row.names(newClass)) %>% 
-  gsub(" \\(.*","",.) %>% 
-  gsub("-.*","",.) %>%
-  gsub("P0","P",.) %>%
-  strsplit(., "_") %>%
-  sapply(., "[", 2)
-
-pheno.mm2 <- merge(pheno.mm, newClass, by.x = "PatientID", by.y = 0, all.x = T)
-pheno.mm2$surv <- with(pheno.mm2, Surv(eventtime, event))
-
-model <- coxph(surv ~ newClass, data = pheno.mm2, model = T)
-
+tmp$gmm.class <- as.factor(tmp$gmm.class)
+model <- coxph(OS ~ gmm.class, data = tmp, model = T)
 model.simex <- mcsimex(model,
-                       SIMEXvariable = "newClass",
+                       SIMEXvariable = "gmm.class",
                        mc.matrix = xhatPi,
                        asymptotic = F)
+full.cox.naive <- summary(model)
+full.cox.simex <- summary(model.simex)
+```
+
+Build Table
+```{r}
+results <- matrix(0, nrow = 6, ncol = 6)
+results[,1] <- full.cox.naive$coefficients[,2]
+results[,2] <- full.cox.naive$conf.int[,3]
+results[,3] <- full.cox.naive$conf.int[,4]
+
+results[,4] <- exp(full.cox.simex$coefficients$jackknife[,1])
+results[,5] <- exp(full.cox.simex$coefficients$jackknife[,1] 
+                   -1.96 * full.cox.simex$coefficients$jackknife[,2])
+results[,6] <- exp(full.cox.simex$coefficients$jackknife[,1] 
+                   +1.96 * full.cox.simex$coefficients$jackknife[,2])
+row.names(results) <- c(row.names(full.cox.naive$coefficients))
+colnames(results)  <- rep(c("HR", "Lower 95", "Upper 95"),2)
+
+kable(results, digits = 2,
+      caption = "Hazard ratio of GMM classes using the naive or simex corrected model") %>%
+  add_header_above(c(" "=1,"Naive" = 3, "Simex" = 3))
 ```
 
