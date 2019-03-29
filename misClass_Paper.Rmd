@@ -334,6 +334,56 @@ ucor <- function(x,y, offSet = 0){
   phiY <- sqrt(mean((y - offSet)^2))
   mean(((x - offSet) / phiX) * ((y - offSet) / phiY))
 }
+
+simexBoot <- function(n.boot,
+                      orig.class,
+                      edata,
+                      pdata,
+                      SIMEXvar){
+  
+  ### Bootstrap MC matrix
+  n <- nrow(edata)
+  if(n.boot != FALSE){
+    boot = sort(sample(1:n, size = n.boot, replace = FALSE))
+  } else{
+    boot = sort(sample(1:n, size = n, replace = TRUE))
+  }
+  bag = edata[boot,]
+  outofbag = edata[-boot,]
+  ct.outofbag <- orig.class[-boot]
+  
+  fit.bag = Mclust(bag, G = 7)
+  pred.outofbag <- predict(fit.bag, outofbag)
+  ctpred.outofbag <- pred.outofbag$classification
+  
+  o.boot = table(ctpred.outofbag, ct.outofbag)
+  nr <- nrow(o.boot)
+  if(nr < 7) o.boot <- rbind(o.boot,matrix(0,ncol=ncol(o.boot),nrow=7-nr))
+  nc <- ncol(o.boot)
+  if(nc < 7) o.boot <- cbind(o.boot,matrix(0,nrow=nrow(o.boot),ncol=7-nc))
+  o.boot = o.boot[opt(o.boot),]
+  
+  ## Build misclassification  matrix for two classes
+  high <- which(colnames(o.boot) %in% c("PR", "MF", "MS"))
+  hatPi <- matrix(data = c(sum(o.boot[-high,-high]),
+                                 sum(o.boot[-high,high]),
+                                 sum(o.boot[high,-high]),
+                                 sum(o.boot[high,high])),
+                        ncol = 2, nrow = 2, byrow = T)
+  
+  hatPi <- sweep(hatPi, MARGIN = 2, FUN="/", STATS=colSums(hatPi))
+  row.names(hatPi) <- colnames(hatPi) <- c("Low Risk", "High Risk")
+  
+  ## Fit naive model on bootstrap sample
+  cox.gmm.naive  <- coxph(OS~gmm.risk, model = TRUE, data = pdata[boot,])
+  
+  ## Fit simex
+  cox.gmm.simex <- mcsimex(cox.gmm.naive,
+                           SIMEXvariable = SIMEXvar,
+                           mc.matrix = smallXhatPi,
+                           asymptotic = FALSE)
+  return(cox.gmm.simex$coefficients)
+}
 ```
 We generate $n = 1000$ independent training data pairs from a Gaussian mixture model, where the prior probabilities of classes 0 and 1 are $\pi_0 = 5/10$ and $\pi_1 = 5/10$ respectively; class 0 and 1 observations have bivariate normal distributions with means $\mu_0=(-1, 0)$ and $\mu_1=(1, 0)$ respectively, and common identity covariance matrix. The outcome is modelled by logistic regression with linear predictor $\alpha + \beta*\mbox{class}$, where $\alpha=-1$ og $\beta=2$.  
 
@@ -790,8 +840,8 @@ sum(diag(conf.hclst))/sum(conf.hclst)
 plot(clust, label = F)
 ```
 
+```{r, echo = F, eval = F}
 ### Python
-```{r}
 library(reticulate)
 pyData <- exprs(zhan_proc[,zhan_proc$regime == "TT2"])
 use_python("/usr/bin/python3", required = T)
@@ -803,10 +853,8 @@ py_run_string("from Bio.Cluster import treecluster")
 ## The centered correlation measure for distance (dist = c)
 py_run_string("tree = treecluster(data = r.pyData, method = 'c', dist = 'c', transpose = 1)")
 py_run_string("clusterid = tree.cut(nclusters = 7)")
-```
 
-Compare classes
-```{r}
+## Compare classes
 labs.py <- py$clusterid
 names(labs.py) <- colnames(pyData)
 labs.py <- data.frame(labs.py)
@@ -820,7 +868,6 @@ conf.hclst.py <- conf.hclst.py[opt(conf.hclst.py), ]
 conf.hclst.py
 sum(diag(conf.hclst.py))/sum(conf.hclst.py)
 ```
-
 
 ## GMM clustering
 We try to cluster the data and cut at 7 groups to see if we get the same results as Zhan 2006.
@@ -980,25 +1027,58 @@ cox.gmm.simex <- mcsimex(cox.gmm,
                          asymptotic = FALSE)
 ```
 
+Try Simex with bootstraps instead
+```{r}
+rerun <- FALSE
+if(!file.exists("GeneratedData/boot.Simex.GMM.RData") || rerun){
+  # 0.632 bootstrap
+  n = nrow(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
+  n.boot = round((1-1/exp(1))*n)
 
+  # Set up parallel computations
+  registerDoParallel(cores = 30)
+  registerDoRNG(seed = 123)
+  
+  # Do simex bootstraps in parallel
+  simex.boot <- foreach(i=1:1000, .combine = "c")  %dopar% {
+    simexBoot(n.boot = FALSE, #Set a number of samples without replacement, or norm bootstrap
+              orig.class = tmp$gmm.class,
+              edata = t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])),
+              pdata = tmp,
+              SIMEXvar = "gmm.risk")
+    }
+  save(simex.boot, file = "GeneratedData/boot.Simex.GMM.RData")
+  stopImplicitCluster()
+} else load("GeneratedData/boot.Simex.GMM.RData")
+```
+
+Build table with results
 ```{r}
 ## Build results matrix
 cox.gmm.sum <- summary(cox.gmm)
-results <- matrix(0, nrow = 2, ncol = 3)
+results <- matrix(0, nrow = 3, ncol = 3)
+# Naive
 results[1,1] <- cox.gmm.sum$coefficients[2]
 results[1,2] <- cox.gmm.sum$conf.int[3]
 results[1,3] <- cox.gmm.sum$conf.int[4]
 
+# Simex
 results[2,1] <- exp(cox.gmm.simex$coefficients)
 results[2,2] <- exp(cox.gmm.simex$coefficients -1.96 * sqrt(cox.gmm.simex$variance.jackknife))
 results[2,3] <- exp(cox.gmm.simex$coefficients +1.96 * sqrt(cox.gmm.simex$variance.jackknife))
-row.names(results) <- c("Naive", "Simex")
+
+# Simex bootstrap
+results[3,1] <- exp(mean(simex.boot))
+results[3,2] <- exp(mean(simex.boot) - 1.96 * sd(simex.boot))
+results[3,3] <- exp(mean(simex.boot) + 1.96 * sd(simex.boot))
+
+row.names(results) <- c("Naive", "Simex", "Simex BS")
 colnames(results)  <- c("HR", "Lower 95", "Upper 95")
 kable(results, digits = 2,
       caption = "Hazard ratio of high vs low risk with the naive and simex corrected model")
 ```
 
-
+### Try with 7 classes
 ```{r, echo = T, eval = T}
 # chunk disabled
 tmp$gmm.class <- as.factor(tmp$gmm.class)
@@ -1009,6 +1089,11 @@ model.simex <- mcsimex(model,
                        asymptotic = F)
 full.cox.naive <- summary(model)
 full.cox.simex <- summary(model.simex)
+```
+
+
+```{r}
+table(tmp$gmm.class, tmp$event)
 ```
 
 Build Table
