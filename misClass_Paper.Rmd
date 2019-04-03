@@ -302,7 +302,12 @@ summarizeResultsCox <- function(results, HR = 2, digits = 2){
 }
 
 bootConf <- function(n.boot, data, orig.class, method = "GMM"){
-  boot = sort(sample(1:n, size = n.boot, replace = FALSE))
+  n <- nrow(data)
+  if(n.boot != FALSE){
+    boot = sort(sample(1:n, size = n.boot, replace = FALSE))
+  } else{
+    boot = sort(sample(1:n, size = n, replace = TRUE))
+  }
   bag = data[boot,]
   outofbag = data[-boot,]
   ct.outofbag <- orig.class[-boot]
@@ -874,30 +879,52 @@ We try to cluster the data and cut at 7 groups to see if we get the same results
 ```{r}
 fit.GMM <- Mclust(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])),G = 7)
 labs <- fit.GMM$classification %>% data.frame(clust = .)
-tmp <- merge(pData(zhan_proc),labs,by = 0)
+pData.gmm <- merge(pData(zhan_proc),labs,by = 0)
 
-conf.GMM <- table(tmp$class,tmp$clust)
+conf.GMM <- table(pData.gmm$class,pData.gmm$clust)
 
 # Reorder to get "diagonal" matrix
 conf.GMM <- conf.GMM[opt(conf.GMM), ]
+conf.GMM.acc <- sum(diag(conf.GMM))/sum(conf.GMM)
 conf.GMM
-sum(diag(conf.GMM))/sum(conf.GMM)
+conf.GMM.acc
 ```
+
+Use most likely groups from confusion matrix to label GMM groups
+```{r}
+pData.gmm$gmm.class <- row.names(conf.GMM)[pData.gmm$clust]
+conf.gmm.train <- table(pData.gmm$class, pData.gmm$gmm.class)
+```
+
+PCA plot for GMM classes
+```{r}
+# Plot of prefiltered data
+pca.mm <- princomp(exprs(zhan_proc[,zhan_proc$regime == "TT2"]))
+
+# Superimposing classes in a pca plot
+pca.plotdata <- data.frame("PC1" = pca.mm[[2]][,1],
+                           "PC2" = pca.mm[[2]][,2],
+                           "Class" = factor(pData.gmm$gmm.class))
+fig.mm.pca <- ggplot(pca.plotdata, aes(x = PC1, y = PC2, col = Class)) +
+  geom_point() + stat_ellipse() +
+  ggtitle("PCA plot for GSE4581")
+fig.mm.pca
+ggsave(fig.mm.pca, file = "Output/Figures/fig_mm_pca.pdf",
+       height = 7, width = 7, dpi = 300)
+```
+
 
 Plot survival curves for fitted groups
 ```{r}
-### Use most likely groups from confusion matrix
-tmp$gmm.class <- row.names(conf.GMM)[tmp$clust]
-table(tmp$class, tmp$gmm.class)
 
-tmp$OS <- Surv(tmp$eventtime,tmp$event)
-fit1 <- survfit(tmp$OS~tmp$class)
-fit2 <- survfit(tmp$OS~tmp$gmm.class)
+pData.gmm$OS <- Surv(pData.gmm$eventtime,pData.gmm$event)
+fit1 <- survfit(pData.gmm$OS~pData.gmm$class)
+fit2 <- survfit(pData.gmm$OS~pData.gmm$gmm.class)
 names(fit1$strata) <- gsub("class=", "", names(fit1$strata))
 names(fit2$strata) <- gsub("gmm.class=", "", names(fit2$strata))
-plot1 <- ggsurvplot(fit1, data = tmp, title = "Zhan Classes", pval = T)
-plot2 <- ggsurvplot(fit2, data = tmp, title = "GMM Classes", pval = T)
-arrange_ggsurvplots(list(plot1, plot2))
+zhan7_train_plot <- ggsurvplot(fit1, data = pData.gmm, title = "Zhan Classes", pval = T)
+gmm7_train_plot <- ggsurvplot(fit2, data = pData.gmm, title = "GMM Classes", pval = T)
+arrange_ggsurvplots(list(zhan7_train_plot, gmm7_train_plot))
 ```
 
 Try in test data
@@ -905,93 +932,137 @@ Try in test data
 test.labs <- predict(fit.GMM, t(exprs(zhan_proc[,zhan_proc$regime == "TT3"])))
 test.labs2 <- data.frame("clust" = test.labs$classification)
 row.names(test.labs2) <- row.names(test.labs$z)
-tmp.test <- merge(pData(zhan_proc),test.labs2,by = 0)
-tmp.test$gmm.class <- row.names(conf.GMM)[tmp.test$clust]
-table(tmp.test$class, tmp.test$gmm.class)
+pData.gmm.test <- merge(pData(zhan_proc),test.labs2,by = 0)
+pData.gmm.test$gmm.class <- row.names(conf.GMM)[pData.gmm.test$clust]
+conf.GMM.val <- table(pData.gmm.test$class, pData.gmm.test$gmm.class)
+conf.GMM.val.acc <- sum(diag(conf.GMM.val)) / sum(conf.GMM.val)
+conf.GMM.val
 ```
 
 KM plots in test data
 ```{r}
-tmp.test$OS <- Surv(tmp.test$eventtime,tmp.test$event)
-fit1 <- survfit(tmp.test$OS~tmp.test$class)
-fit2 <- survfit(tmp.test$OS~tmp.test$gmm.class)
+pData.gmm.test$OS <- Surv(pData.gmm.test$eventtime,pData.gmm.test$event)
+fit1 <- survfit(pData.gmm.test$OS~pData.gmm.test$class)
+fit2 <- survfit(pData.gmm.test$OS~pData.gmm.test$gmm.class)
 names(fit1$strata) <- gsub("class=", "", names(fit1$strata))
 names(fit2$strata) <- gsub("gmm.class=", "", names(fit2$strata))
-plot1 <- ggsurvplot(fit1, data = tmp.test, title = "Zhan Classes (Test data)", pval = T)
-plot2 <- ggsurvplot(fit2, data = tmp.test, title = "GMM Classes (Test data)", pval = T)
-arrange_ggsurvplots(list(plot1, plot2))
+zhan7_val_plot <- ggsurvplot(fit1, data = pData.gmm.test, title = "Zhan Classes (Test data)", pval = T)
+gmm7_val_plot <- ggsurvplot(fit2, data = pData.gmm.test, title = "GMM Classes (Test data)", pval = T)
+arrange_ggsurvplots(list(zhan7_val_plot, gmm7_val_plot))
 ```
 
 
 ## Cox regression in cancer data
 Define low and high risk groups and do cox regression in training data
 ```{r}
-tmp$zhan.risk <- factor(ifelse(tmp$class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
+pData.gmm$zhan.risk <- factor(ifelse(pData.gmm$class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
                             levels = c("Low Risk", "High Risk"))
-tmp$gmm.risk <- factor(ifelse(tmp$gmm.class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
+pData.gmm$gmm.risk <- factor(ifelse(pData.gmm$gmm.class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
                            levels = c("Low Risk", "High Risk"))
 
-coxph(OS~zhan.risk, data = tmp)
-coxph(OS~gmm.risk, data = tmp)
+coxph(OS~zhan.risk, data = pData.gmm)
+coxph(OS~gmm.risk, data = pData.gmm)
 ```
 
 Kaplan-Meier plot for low vs high risk
 ```{r}
-fit1 <- survfit(tmp$OS~tmp$zhan.risk)
-fit2 <- survfit(tmp$OS~tmp$gmm.risk)
+fit1 <- survfit(pData.gmm$OS~pData.gmm$zhan.risk)
+fit2 <- survfit(pData.gmm$OS~pData.gmm$gmm.risk)
 names(fit1$strata) <- gsub("zhan.risk=", "", names(fit1$strata))
 names(fit2$strata) <- gsub("gmm.risk=", "", names(fit2$strata))
-plot1 <- ggsurvplot(fit1, data = tmp, title = "Zhan Risk Class", pval = T)
-plot2 <- ggsurvplot(fit2, data = tmp, title = "GMM Risk Class", pval = T)
-arrange_ggsurvplots(list(plot1, plot2))
+zhanRisk_train_plot <- ggsurvplot(fit1, data = pData.gmm, title = "Zhan Risk Class", pval = T)
+gmmRisk_train_plot <- ggsurvplot(fit2, data = pData.gmm, title = "GMM Risk Class", pval = T)
+arrange_ggsurvplots(list(zhanRisk_train_plot, gmmRisk_train_plot))
 ```
 
 
 Try in test data
 ```{r}
-tmp.test$zhan.risk <- factor(ifelse(tmp.test$class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
+pData.gmm.test$zhan.risk <- factor(ifelse(pData.gmm.test$class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
                             levels = c("Low Risk", "High Risk"))
-tmp.test$gmm.risk <- factor(ifelse(tmp.test$gmm.class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
+pData.gmm.test$gmm.risk <- factor(ifelse(pData.gmm.test$gmm.class %in% c("PR", "MF", "MS"), "High Risk", "Low Risk"),
                            levels = c("Low Risk", "High Risk"))
 
-coxph(OS~zhan.risk, data = tmp.test)
-coxph(OS~gmm.risk, data = tmp.test)
+coxph(OS~zhan.risk, data = pData.gmm.test)
+coxph(OS~gmm.risk, data = pData.gmm.test)
 ```
 
 Kaplan-Meier plot for low vs high risk
 ```{r}
-fit1 <- survfit(tmp.test$OS~tmp.test$zhan.risk)
-fit2 <- survfit(tmp.test$OS~tmp.test$gmm.risk)
+fit1 <- survfit(pData.gmm.test$OS~pData.gmm.test$zhan.risk)
+fit2 <- survfit(pData.gmm.test$OS~pData.gmm.test$gmm.risk)
 names(fit1$strata) <- gsub("zhan.risk=", "", names(fit1$strata))
 names(fit2$strata) <- gsub("gmm.risk=", "", names(fit2$strata))
-plot1 <- ggsurvplot(fit1, data = tmp.test, title = "Zhan Risk Class (test data)", pval = T)
-plot2 <- ggsurvplot(fit2, data = tmp.test, title = "GMM Risk Class (test data)", pval = T)
-arrange_ggsurvplots(list(plot1, plot2))
+zhanRisk_val_plot <- ggsurvplot(fit1, data = pData.gmm.test,
+                                title = "Zhan Risk Class (test data)", pval = T)
+gmmRisk_val_plot <- ggsurvplot(fit2, data = pData.gmm.test,
+                               title = "GMM Risk Class (test data)", pval = T)
+arrange_ggsurvplots(list(zhanRisk_val_plot, gmmRisk_val_plot))
+```
+
+Dump plots for publication
+```{r}
+trainSurvPlots <- arrange_ggsurvplots(list(zhan7_train_plot + labs(tag = "A"),
+                                           zhanRisk_train_plot  + labs(tag = "C"),
+                                           gmm7_train_plot + labs(tag = "B"),
+                                           gmmRisk_train_plot + labs(tag = "D")),
+                                      ncol = 2, nrow = 2,
+                                      print = F)
+valSurvPlots <- arrange_ggsurvplots(list(zhan7_val_plot + labs(tag = "A"),
+                                           zhanRisk_val_plot + labs(tag = "B"),
+                                           gmm7_val_plot + labs(tag = "C"),
+                                           gmmRisk_val_plot + labs(tag = "D")),
+                                      ncol = 2, nrow = 2,
+                                    print=F)
+
+ggsave(trainSurvPlots, file = "Output/Figures/trainSurvPlots.pdf",
+       height = 7, width = 7, dpi = 300)
+ggsave(valSurvPlots, file = "Output/Figures/valSurvPlots.pdf",
+       height = 7, width = 7, dpi = 300)
+```
+
+
+```{r, echo = FALSE}
+## Dump tables
+tab.conf.mm <- Hmisc::latex(conf.GMM,
+             title = "",
+             file = "Output/Tables/conf.mm.tex",
+             caption = paste("Confusion matrix for training set of GSE4581, accuracy = ",
+                             round(conf.GMM.acc,2)),
+             label = "confmm:train")
+
+tab.conf.mm <- Hmisc::latex(conf.GMM.val,
+             title = "",
+             file = "Output/Tables/conf.mm.val.tex",
+             caption = paste("Confusion matrix for validation set of GSE4581, accuracy = ",
+                             round(conf.GMM.val.acc,2)),
+             label = "confmm:val")
 ```
 
 Bootstrap misclassification matrix
 ```{r}
 # Misclaffification matrix
-ct <- tmp$gmm.class
+ct <- pData.gmm$gmm.class
 
 # 0.632 bootstrap
 n = nrow(t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])))
 n.boot = round((1-1/exp(1))*n)
 
-if(!file.exists("GeneratedData/boots.GMM.RData")){
+bootsFile <- "GeneratedData/mc.boots.GMM.RData"
+if(!file.exists(bootsFile)){
   # Set up parallel computations
   registerDoParallel(cores = 30)
   registerDoRNG(seed = 321)
   
-  r.boot <- foreach(i=1:100, .combine = "+")  %dopar% {
+  r.boot <- foreach(i=1:1000, .combine = "+")  %dopar% {
     bootConf(n.boot = n.boot,
              data = t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])),
              orig.class = ct,
              method = "GMM")
   }
-  save(r.boot, file = "GeneratedData/boots.GMM.RData")
+  save(r.boot, file = bootsFile)
   stopImplicitCluster()
-} else load("GeneratedData/boots.GMM.RData")
+} else load(bootsFile)
 
 ## Build hatPi matrix from bootstraps
 hatPi <- sweep(r.boot, MARGIN = 2, FUN="/", STATS=colSums(r.boot))
@@ -1020,7 +1091,7 @@ kable(smallXhatPi)
 
 Then we fit the cox model and do SIMEX correction.
 ```{r}
-cox.gmm  <- coxph(OS~gmm.risk, model = TRUE, data = tmp)
+cox.gmm  <- coxph(OS~gmm.risk, model = TRUE, data = pData.gmm)
 cox.gmm.simex <- mcsimex(cox.gmm,
                          SIMEXvariable = "gmm.risk",
                          mc.matrix = smallXhatPi,
@@ -1042,9 +1113,9 @@ if(!file.exists("GeneratedData/boot.Simex.GMM.RData") || rerun){
   # Do simex bootstraps in parallel
   simex.boot <- foreach(i=1:1000, .combine = "c")  %dopar% {
     simexBoot(n.boot = FALSE, #Set a number of samples without replacement, or norm bootstrap
-              orig.class = tmp$gmm.class,
+              orig.class = pData.gmm$gmm.class,
               edata = t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])),
-              pdata = tmp,
+              pdata = pData.gmm,
               SIMEXvar = "gmm.risk")
     }
   save(simex.boot, file = "GeneratedData/boot.Simex.GMM.RData")
@@ -1056,33 +1127,52 @@ Build table with results
 ```{r}
 ## Build results matrix
 cox.gmm.sum <- summary(cox.gmm)
-results <- matrix(0, nrow = 3, ncol = 3)
+cox.gmm.simex.sum <- summary(cox.gmm.simex)
+
+results <- matrix(0, nrow = 3, ncol =4)
 # Naive
 results[1,1] <- cox.gmm.sum$coefficients[2]
 results[1,2] <- cox.gmm.sum$conf.int[3]
 results[1,3] <- cox.gmm.sum$conf.int[4]
+results[1,4] <- cox.gmm.sum$coefficients[5]
 
 # Simex
-results[2,1] <- exp(cox.gmm.simex$coefficients)
+results[2,1] <- exp(cox.gmm.simex$coefficients)[1]
 results[2,2] <- exp(cox.gmm.simex$coefficients -1.96 * sqrt(cox.gmm.simex$variance.jackknife))
 results[2,3] <- exp(cox.gmm.simex$coefficients +1.96 * sqrt(cox.gmm.simex$variance.jackknife))
+results[2,4] <- cox.gmm.simex.sum$coefficients$jackknife[4]
 
 # Simex bootstrap
+df <- cox.gmm$n - length(coef(cox.gmm))
 results[3,1] <- exp(mean(simex.boot))
 results[3,2] <- exp(mean(simex.boot) - 1.96 * sd(simex.boot))
 results[3,3] <- exp(mean(simex.boot) + 1.96 * sd(simex.boot))
+results[3,4] <- 2 * pt(abs(mean(simex.boot)/sd(simex.boot)), df, lower.tail = F) 
 
-row.names(results) <- c("Naive", "Simex", "Simex BS")
-colnames(results)  <- c("HR", "Lower 95", "Upper 95")
+row.names(results) <- c("Naive", "Simex", "Simex Bootstrap")
+colnames(results)  <- c("HR", "Lower 95", "Upper 95", "P-value")
 kable(results, digits = 2,
       caption = "Hazard ratio of high vs low risk with the naive and simex corrected model")
 ```
 
+Latex table with results
+```{r}
+resultsLatex <- results
+resultsLatex[,1:3] <- round(resultsLatex[,1:3], 2)
+tab.cox.mm <- Hmisc::latex(resultsLatex,
+             title = "",
+             file = "Output/Tables/cox.mm.tex",
+             caption = "Results from MC-SIMEX corrected cox regression",
+             label = "tab.cox.mm")
+
+```
+
+
 ### Try with 7 classes
 ```{r, echo = T, eval = T}
 # chunk disabled
-tmp$gmm.class <- as.factor(tmp$gmm.class)
-model <- coxph(OS ~ gmm.class, data = tmp, model = T)
+pData.gmm$gmm.class <- as.factor(pData.gmm$gmm.class)
+model <- coxph(OS ~ gmm.class, data = pData.gmm, model = T)
 model.simex <- mcsimex(model,
                        SIMEXvariable = "gmm.class",
                        mc.matrix = xhatPi,
@@ -1091,9 +1181,9 @@ full.cox.naive <- summary(model)
 full.cox.simex <- summary(model.simex)
 ```
 
-
+Tabulate number of events per class to investigate poor performance of cox ph.
 ```{r}
-table(tmp$gmm.class, tmp$event)
+table(pData.gmm$gmm.class, pData.gmm$event)
 ```
 
 Build Table
