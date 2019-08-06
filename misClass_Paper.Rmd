@@ -12,7 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 knitr::knit_engines$set(python = reticulate::eng_python)
 
 # Install simex package with cox
-#devtools::install_github("https://github.com/HaemAalborg/simex", force = T)
+#devtools::install_github("https://github.com/HaemAalborg/simex-1", force = T)
 
 # Packages from CRAN
 library(knitr, quietly = T)
@@ -30,6 +30,7 @@ library(survminer)
 library(magrittr)
 library(tidyverse)
 library(kableExtra)
+library(GFORCE)
 
 # Packages from Bioconductor
 library(Biobase)
@@ -1123,36 +1124,49 @@ if(!file.exists("GeneratedData/boot.Simex.GMM.RData") || rerun){
 } else load("GeneratedData/boot.Simex.GMM.RData")
 ```
 
+Train model with Zhan risk classes for comparisson
+```{r}
+cox.zhan.sum <- summary(coxph(OS ~ zhan.risk, data = pData.gmm))
+```
+
+
 Build table with results
 ```{r}
 ## Build results matrix
 cox.gmm.sum <- summary(cox.gmm)
 cox.gmm.simex.sum <- summary(cox.gmm.simex)
 
-results <- matrix(0, nrow = 3, ncol =4)
+results <- matrix(0, nrow = 4, ncol =4)
+# Zhan Naive
+results[1,1] <- cox.zhan.sum$coefficients[2]
+results[1,2] <- cox.zhan.sum$conf.int[3]
+results[1,3] <- cox.zhan.sum$conf.int[4]
+results[1,4] <- cox.zhan.sum$coefficients[5]
+
+
 # Naive
-results[1,1] <- cox.gmm.sum$coefficients[2]
-results[1,2] <- cox.gmm.sum$conf.int[3]
-results[1,3] <- cox.gmm.sum$conf.int[4]
-results[1,4] <- cox.gmm.sum$coefficients[5]
+results[2,1] <- cox.gmm.sum$coefficients[2]
+results[2,2] <- cox.gmm.sum$conf.int[3]
+results[2,3] <- cox.gmm.sum$conf.int[4]
+results[2,4] <- cox.gmm.sum$coefficients[5]
 
 # Simex
-results[2,1] <- exp(cox.gmm.simex$coefficients)[1]
-results[2,2] <- exp(cox.gmm.simex$coefficients -1.96 * sqrt(cox.gmm.simex$variance.jackknife))
-results[2,3] <- exp(cox.gmm.simex$coefficients +1.96 * sqrt(cox.gmm.simex$variance.jackknife))
-results[2,4] <- cox.gmm.simex.sum$coefficients$jackknife[4]
+results[3,1] <- exp(cox.gmm.simex$coefficients)[1]
+results[3,2] <- exp(cox.gmm.simex$coefficients -1.96 * sqrt(cox.gmm.simex$variance.jackknife))
+results[3,3] <- exp(cox.gmm.simex$coefficients +1.96 * sqrt(cox.gmm.simex$variance.jackknife))
+results[3,4] <- cox.gmm.simex.sum$coefficients$jackknife[4]
 
 # Simex bootstrap
 df <- cox.gmm$n - length(coef(cox.gmm))
-results[3,1] <- exp(mean(simex.boot))
-results[3,2] <- exp(mean(simex.boot) - 1.96 * sd(simex.boot))
-results[3,3] <- exp(mean(simex.boot) + 1.96 * sd(simex.boot))
-results[3,4] <- 2 * pt(abs(mean(simex.boot)/sd(simex.boot)), df, lower.tail = F) 
+results[4,1] <- exp(mean(simex.boot))
+results[4,2] <- exp(mean(simex.boot) - 1.96 * sd(simex.boot))
+results[4,3] <- exp(mean(simex.boot) + 1.96 * sd(simex.boot))
+results[4,4] <- 2 * pt(abs(mean(simex.boot)/sd(simex.boot)), df, lower.tail = F) 
 
-row.names(results) <- c("Naive", "Simex", "Simex Bootstrap")
+row.names(results) <- c("Zhan classes - Naïve","GMM - Naïve", "GMM - Simex (Average MC)", "GMM - Simex (Full bootstrap)")
 colnames(results)  <- c("HR", "Lower 95", "Upper 95", "P-value")
 kable(results, digits = 2,
-      caption = "Hazard ratio of high vs low risk with the naive and simex corrected model")
+      caption = "Hazard ratio of high vs low risk groups from Zhan2006 with the naïve and simex corrected models using the GMM classes.")
 ```
 
 Latex table with results
@@ -1162,7 +1176,7 @@ resultsLatex[,1:3] <- round(resultsLatex[,1:3], 2)
 tab.cox.mm <- Hmisc::latex(resultsLatex,
              title = "",
              file = "Output/Tables/cox.mm.tex",
-             caption = "Results from MC-SIMEX corrected cox regression",
+             caption = "Hazard ratio of high vs low risk groups in the training set from Zhan2006 with the naïve and simex corrected models using the GMM classes.",
              label = "tab.cox.mm")
 
 ```
