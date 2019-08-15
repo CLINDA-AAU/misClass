@@ -1,2 +1,2 @@
 # misClass
-R code and output for unsupervised clustering misclassification project
+R code and output for the unsupervised clustering misclassification project
