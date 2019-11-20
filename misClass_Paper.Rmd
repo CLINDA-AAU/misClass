@@ -2,10 +2,10 @@
 title: Regression modelling based on imperfect labels arising from unsupervised learning
   by Gaussian mixture models
 author: "Rasmus Brøndum, Thomas Yssing Michalsen & Martin Bøgsted"
-date: "13 3 2019"
+date: "20 11 2019"
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
 ---
 ```{r setup, include=FALSE, echo = FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -39,11 +39,10 @@ library(affy)
 library(hgu133plus2cdf)
 ```
 
-Auxillary functions
-```{r auxillary functions, include = FALSE, echo = FALSE}
-
+# Auxillary functions
+```{r auxillary functions}
 # The k-means function does not come with a predict method in its name space
-# you have to build your own. A suggestion called predict.keans is given 
+# you have to build your own. A suggestion called predict.kmeans is given 
 # at the home page
 #
 # https://stats.stackexchange.com/questions/12623/predicting-cluster-of-a-new-object-with-kmeans-in-r
@@ -391,9 +390,11 @@ simexBoot <- function(n.boot,
   return(cox.gmm.simex$coefficients)
 }
 ```
-We generate $n = 1000$ independent training data pairs from a Gaussian mixture model, where the prior probabilities of classes 0 and 1 are $\pi_0 = 5/10$ and $\pi_1 = 5/10$ respectively; class 0 and 1 observations have bivariate normal distributions with means $\mu_0=(-1, 0)$ and $\mu_1=(1, 0)$ respectively, and common identity covariance matrix. The outcome is modelled by logistic regression with linear predictor $\alpha + \beta*\mbox{class}$, where $\alpha=-1$ og $\beta=2$.  
 
-```{r GMM, echo = FALSE}
+# Simulation with logistic regression
+We generate $n = 1000$ independent training data pairs from a Gaussian mixture model, where the prior probabilities of classes 0 and 1 are $\pi_0 = 5/10$ and $\pi_1 = 5/10$ respectively; class 0 and 1 observations have bivariate normal distributions with means $\mu_0=(-1, 0)$ and $\mu_1=(1, 0)$ respectively, and common identity covariance matrix. The outcome is modelled by logistic regression with linear predictor $\alpha + \beta *\mbox{class}$, where $\alpha=-1$ and $\beta=2$.  
+
+```{r GMM}
 # Graphical parameters for this chunck
 par(pty = "s")
 
@@ -424,9 +425,68 @@ plot(feature[, 1], feature[, 2], col = ccol, pch = 16,
 
 ```
 
-Obviously, a number of observations will be mis-classfied, so by simulation we investigate the performace of the MC-SIMEX procedure. A range of scenarios similar to the one described above was tested by varying both the number of training data pairs $n = (200, 500, 1000)$ and the class probability $\pi_0 = (0.2, 0.5)$ . Each scenario was repeated 1000 times to calculate the mis-classification matrix by monte carlo simulation. We performed unsupervised clustering with GMM and Kmeans.
 
-```{r simulation, echo = FALSE}
+Obviously, a number of observations will be mis-classfied, so by simulation we investigate the performace of the MC-SIMEX procedure. First we plot a figure showing the principle behind the SIMEX procedure:
+```{r}
+# Simulate data with 20% misclassification
+set.seed(1008)
+X1 <- rbinom(100, size = 1, p = 0.5) +1
+X2 <- 2*rbinom(100, size = 1, p = 0.2) + X1
+X2 <- case_when(X2 == 1 ~ 1,
+                X2 == 2 ~ 2,
+                X2 == 3 ~ 2,
+                X2 == 4 ~ 1)
+
+# Simulate outcome based on true classes
+outcome   <- rbinom(100, size = 1, 
+                    p = exp(-1 + 2*(X1==2))/(1+exp(-1 + 2*(X1==2))))
+
+# Create dataframe and misclassification matrix
+train <- data.frame(id = 1:100,
+                    "X1" = factor(X1),
+                    "X2" = factor(X2),
+                    outcome)
+hatPi <- matrix(c(0.8,0.2,0.2,0.8), ncol =2, byrow = T)
+dimnames(hatPi) <- list(levels(train$X1), levels(train$X1))
+
+# Fit Naive model
+naive <- glm(outcome ~ X2, data = train, family = binomial, x = T, y =T)
+
+# Simex correct for misclassification
+fit.class <- mcsimex(naive, mc.matrix = hatPi, SIMEXvariable = "X2")
+
+# Extract data for plot
+plotEst    <- data.frame(fit.class$SIMEX.estimates)
+plotPoints <- data.frame("lambda"    = rep(fit.class$lambda[-1], each = 100),
+                         "Bootstrap" = unlist(fit.class$theta$X22))
+lambda     <- seq(-1,max(plotEst$lambda), by = 0.01)
+plotLine   <- data.frame(lambda,
+                         (predict(fit.class$extrapolation, newdata = data.frame(lambda))))
+
+# Plot SIMEX figure                     
+simex.plot <- ggplot(plotPoints, aes(x = lambda + 1, y = Bootstrap)) +
+  geom_point(col = "grey") +
+  geom_point(data = plotEst, aes(x = lambda + 1, y = X22), size = 3) +
+  geom_line(data = subset(plotLine, lambda > 0), aes(x = lambda + 1, y = X22)) +
+  geom_line(data = subset(plotLine, lambda < 0), aes(x = lambda + 1, y = X22), linetype = "dashed") +
+  geom_text(x = plotEst$lambda[1]+1.4, y = plotEst$X22[1], label = "MCSIMEX estimate") +
+  geom_text(x = plotEst$lambda[2]+1.4, y = plotEst$X22[2], label = "Naïve estimate") +
+  theme_bw() +
+  ylab(expression(beta)) +
+  theme(axis.text.y = element_text(angle = 90)) +
+  xlab(expression(lambda + 1))
+simex.plot
+```
+
+```{r, echo = FALSE}
+ggsave(simex.plot, file = "Output/Figures/simex.plot.pdf",
+       height = 7, width = 7, dpi = 300)
+```
+
+
+A range of scenarios similar to the one described above was tested by varying both the number of training data pairs $n = (200, 500, 1000)$ and the class probability $\pi_0 = (0.2, 0.5)$ . Each scenario was repeated 1000 times to calculate the mis-classification matrix by monte carlo simulation. We performed unsupervised clustering with GMM and Kmeans.
+
+```{r simulation}
 rerun <- FALSE
 
 # Number of simulated experiments
@@ -469,7 +529,7 @@ if(!file.exists("GeneratedData/sim_results_binom.RData") || rerun){
 ```
 
 Summarize the result of the 1000 simulations. We see clearly an attenuation under mislabeling, and considerable improvement under the MC-SIMEX approach.
-```{r simulations, echo = FALSE}
+```{r simulations}
 load("GeneratedData/sim_results_binom.RData")
 
 ## Summarize results
@@ -522,7 +582,35 @@ tUbal <- Hmisc::latex(unbalanced[,-1],
 ```
 
 
-# Survival outcome
+```{r, echo = FALSE, warning = FALSE}
+## Create Latex tables
+tBal <- Hmisc::latex(balanced[-c(3,4,9,10,15,16),-c(1,5)],
+             title = "",
+             cgroup = c("","GMM", "Kmeans"),
+             n.cgroup = c(1,2,2),
+             rgroup = c(200,500,1000),
+             n.rgroup = c(4,4,4),
+             file = "Output/Tables/balancedNew.tex",
+             colheads = c(rep(c("True", "Naive","Simex"),2)),
+             caption = "Results from balanced simulations",
+             label = "simResults:balanced"
+             )
+tUbal <- Hmisc::latex(unbalanced[-c(3,4,9,10,15,16),-c(1,5)],
+             title = "",
+             cgroup = c("","GMM", "Kmeans"),
+             n.cgroup = c(1,2,2),
+             rgroup = c(200,500,1000),
+             n.rgroup = c(4,4,4),
+             file = "Output/Tables/unbalancedNew.tex",
+             colheads = c(rep(c("True", "Naive","Simex"),2)),
+             caption = "Results from unbalanced simulations",
+             label = "simResults:unbalanced"
+             )
+
+```
+
+
+# Simulation with survival data
 Now we want to see if how MCSIMEX works with survival data. We generate $n = 200$, $n = 500$ or $n = 1000$ training datapoints from two classes using a binomal distribution with parameter $\pi = 0.5$ and add noise to get misclassification probabilities of $0.1$, $0.2$ or $0.3$ for both classes. The outcome is assumed to be exponentially distributed with rate $\beta*(1+\mbox{class})$ and the censoring time exponentially distributed with reate 0.5. We estimate the hazard ratio of the two classes using the true classlabels, the misspecified classlabels, and the simex corrected hazard ratio using a misclassificationsmatrix with the true misclassification rates. 
 ```{r}
 rerun <- FALSE
@@ -612,6 +700,23 @@ tCox <- Hmisc::latex(coxTable[,-1],
              label = "simResults:cox"
            )
 ```
+
+```{r, echo = FALSE, warning = FALSE}
+## Create Latex tables
+tCox <- Hmisc::latex(coxTable[-c(2,5,8),-c(1,5,8)],
+             title = "",
+             cgroup = c("","mp = 0.1", "mp = 0.2","mp = 0.3"),
+             n.cgroup = c(1,2,2,2),
+             rgroup = c(200,500,1000),
+             n.rgroup = c(2,2,2),
+             file = "Output/Tables/cox_new.tex",
+             colheads = c("True", rep(c("Naive","Simex"),3)),
+             caption = "Results from cox estimation of 1000 simulations using a misclassification probability (mp) of 0.1, 0.2 or 0.3",
+             label = "simResults:cox"
+           )
+
+```
+
 
 # Cancer subclassification
 Load and data management of multiple myeloma data, GES4581. The raw CEL files are available from a later study and stored in GEO repositoty GSE24080, so we download these and use metadata from the two studys to match them by patientID.
@@ -847,6 +952,12 @@ plot(clust, label = F)
 ```
 
 ```{r, echo = F, eval = F}
+### This chunk is an attempt to recreate classes using the same
+### clustering algorhithm as in Zhan (2006). We could only find
+### an implementation in the python bio.tools package, so this is
+### done using the reticulate R library. Resulst were poor, so we
+### did not use them for the paper.
+
 ### Python
 library(reticulate)
 pyData <- exprs(zhan_proc[,zhan_proc$regime == "TT2"])
@@ -1018,6 +1129,8 @@ valSurvPlots <- arrange_ggsurvplots(list(zhan7_val_plot + labs(tag = "A"),
 
 ggsave(trainSurvPlots, file = "Output/Figures/trainSurvPlots.pdf",
        height = 7, width = 7, dpi = 300)
+ggsave(trainSurvPlots, file = "Output/Figures/trainSurvPlots.eps",
+       height = 7, width = 7, dpi = 350)
 ggsave(valSurvPlots, file = "Output/Figures/valSurvPlots.pdf",
        height = 7, width = 7, dpi = 300)
 ```
@@ -1220,3 +1333,8 @@ kable(results, digits = 2,
   add_header_above(c(" "=1,"Naive" = 3, "Simex" = 3))
 ```
 
+Print sessioninfo
+```{r}
+options(width = 100)
+devtools::session_info()
+```
