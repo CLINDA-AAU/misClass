@@ -466,11 +466,12 @@ plotLine   <- data.frame(lambda,
 # Plot SIMEX figure                     
 simex.plot <- ggplot(plotPoints, aes(x = lambda + 1, y = Bootstrap)) +
   geom_point(col = "grey") +
-  geom_point(data = plotEst, aes(x = lambda + 1, y = X22), size = 3) +
+  geom_point(data = subset(plotEst, lambda>=0), aes(x = lambda + 1, y = X22), size = 3) +
+  geom_point(data = subset(plotEst, lambda<0), aes(x = lambda + 1, y = X22), size = 3, pch = 1) +
   geom_line(data = subset(plotLine, lambda > 0), aes(x = lambda + 1, y = X22)) +
   geom_line(data = subset(plotLine, lambda < 0), aes(x = lambda + 1, y = X22), linetype = "dashed") +
-  geom_text(x = plotEst$lambda[1]+1.4, y = plotEst$X22[1], label = "MCSIMEX estimate") +
-  geom_text(x = plotEst$lambda[2]+1.4, y = plotEst$X22[2], label = "Naïve estimate") +
+  annotate("text", x = plotEst$lambda[1]+1.4, y = plotEst$X22[1], label = "MCSIMEX estimate") +
+  annotate("text", x = plotEst$lambda[2]+1.4, y = plotEst$X22[2], label = "Naïve estimate") +
   theme_bw() +
   ylab(expression(beta)) +
   theme(axis.text.y = element_text(angle = 90)) +
@@ -479,8 +480,8 @@ simex.plot
 ```
 
 ```{r, echo = FALSE}
-ggsave(simex.plot, file = "Output/Figures/simex.plot.pdf",
-       height = 7, width = 7, dpi = 300)
+ggsave(simex.plot, file = "Output/Figures/simex.plot.eps",
+       height = 5, width = 7, dpi = 300)
 ```
 
 
