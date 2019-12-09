@@ -1,0 +1,786 @@
+---
+title: Regression modelling based on imperfect labels arising from unsupervised learning
+  by Gaussian mixture models
+author: "Rasmus Brøndum, Thomas Yssing Michalsen & Martin Bøgsted"
+date: "05 12 2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r setup, include=FALSE, echo = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Install simex package with cox
+#devtools::install_github("https://github.com/HaemAalborg/simex-1", force = T)
+
+# Packages from CRAN
+library(knitr, quietly = T)
+library(dplyr, quietly = T)
+library(mclust, quietly = T)
+library(mixtools, quietly = T)
+library(simex, quietly = T)
+library(survival, quietly = T)
+library(arrangements, quietly = T)
+library(foreach)
+library(doParallel)
+library(doRNG)
+library(Hmisc)
+library(survminer)
+library(magrittr)
+library(tidyverse)
+library(kableExtra)
+library(GFORCE)
+library(cluster)
+
+# Packages from Bioconductor
+library(Biobase)
+library(GEOquery)
+library(affy)
+library(hgu133plus2cdf)
+```
+
+# Auxillary functions
+```{r auxillary functions, echo=FALSE}
+# The k-means function does not come with a predict method in its name space
+# you have to build your own. A suggestion called predict.kmeans is given 
+# at the home page
+#
+# https://stats.stackexchange.com/questions/12623/predicting-cluster-of-a-new-object-with-kmeans-in-r
+#
+predict.kmeans <- function(object,
+                           newdata,
+                           method = c("centers", "classes")) {
+  method <- match.arg(method)
+  
+  centers <- object$centers
+  ss_by_center <- apply(centers, 1, function(x) {
+    colSums((t(newdata) - x) ^ 2)
+  })
+  best_clusters <- apply(ss_by_center, 1, which.min)
+  
+  if (method == "centers") {
+    centers[best_clusters, ]
+  } else {
+    best_clusters
+  }
+}
+
+# Reordering a confusion matrix to optimize accuracy
+opt <- function(x){
+  acc <- function(x)
+  {
+    sum(diag(x))/sum(x)
+  }
+  pe <- permutations(7,7)
+  curr.x <- acc(x)
+  curr.i <- 1:7
+  for(i in 1:nrow(pe)){
+    if(acc(x[pe[i,],])>curr.x){ 
+      curr.i = pe[i,]
+      curr.x <- acc(x[pe[i,],])
+    }
+  }
+  curr.i
+}
+
+# Function to estimate the misclassification matrix from a Gaussian mixture model
+# fitted by Mclust by Monte Carlo integration or kmeans.
+Pi <- function(fit){
+  if(class(fit) == "Mclust"){
+    cl  <- unique(fit$classification)
+    n.cl <- length(cl)
+    hatPi <- matrix(0, n.cl, n.cl)
+    for(j in cl){
+      x <- rmvnorm(100000, fit$parameters$mean[,j], fit$parameters$variance$sigma[ , , j])
+      p.x <- predict(fit,x)$classification
+      for(i in cl){
+        hatPi[i,j] <- mean(p.x == i)
+      }
+    }
+    reord <- order(fit$parameters$mean[1,])
+    hatPi <- hatPi[reord, reord]
+  }
+  if(class(fit) == "kmeans"){
+    cl <- unique(fit$cluster)
+    n.cl <- length(cl)
+    hatPi <- matrix(0, n.cl, n.cl)
+    sds <- sqrt(fit$withinss / fit$size)
+    for(j in cl){
+      x <- rmvnorm(100000, fit$centers[j,], diag(sds[j],2))
+      p.x <- predict.kmeans(fit, newdata = x, method = "classes")
+      for(i in cl){
+        hatPi[i,j] <- mean(p.x == i)
+      }
+    }
+    reord <- order(fit$centers[,1])
+    hatPi <- hatPi[reord, reord]
+  }
+  hatPi
+}
+
+bootConf <- function(n.boot, data, orig.class, method = "GMM"){
+  n <- nrow(data)
+  if(n.boot != FALSE){
+    boot = sort(sample(1:n, size = n.boot, replace = FALSE))
+  } else{
+    boot = sort(sample(1:n, size = n, replace = TRUE))
+  }
+  bag = data[boot,]
+  outofbag = data[-boot,]
+  ct.outofbag <- orig.class[-boot]
+  
+  if(method == "GMM"){
+    fit.bag = Mclust(bag, G = 7)
+    pred.outofbag <- predict(fit.bag, outofbag)
+    ctpred.outofbag <- pred.outofbag$classification
+  }
+  if(method =="Kmeans"){
+    fit.bag = kmeans(bag, 7)
+    pred.outofbag <- predict.kmeans(fit.bag, outofbag)
+    ctpred.outofbag = dimnames(pred.outofbag)[[1]]
+    names(ctpred.outofbag) <- rownames(pred.outofbag$z)
+  }
+  
+  o.boot = table(ctpred.outofbag, ct.outofbag)
+  nr <- nrow(o.boot)
+  if(nr < 7) o.boot <- rbind(o.boot,matrix(0,ncol=ncol(o.boot),nrow=7-nr))
+  nc <- ncol(o.boot)
+  if(nc < 7) o.boot <- cbind(o.boot,matrix(0,nrow=nrow(o.boot),ncol=7-nc))
+  o.boot = o.boot[opt(o.boot),]
+  return(o.boot)
+}
+
+# Uncentered correlation coefficient
+ucor <- function(x,y, offSet = 0){
+  phiX <- sqrt(mean((x - offSet)^2))
+  phiY <- sqrt(mean((y - offSet)^2))
+  mean(((x - offSet) / phiX) * ((y - offSet) / phiY))
+}
+
+simexBoot <- function(n.boot,
+                      orig.class,
+                      edata,
+                      pdata,
+                      SIMEXvar){
+  
+  ### Bootstrap MC matrix
+  n <- nrow(edata)
+  if(n.boot != FALSE){
+    boot = sort(sample(1:n, size = n.boot, replace = FALSE))
+  } else{
+    boot = sort(sample(1:n, size = n, replace = TRUE))
+  }
+  bag = edata[boot,]
+  outofbag = edata[-boot,]
+  ct.outofbag <- orig.class[-boot]
+  
+  fit.bag = Mclust(bag, G = 7)
+  pred.outofbag <- predict(fit.bag, outofbag)
+  ctpred.outofbag <- pred.outofbag$classification
+  
+  o.boot = table(ctpred.outofbag, ct.outofbag)
+  nr <- nrow(o.boot)
+  if(nr < 7) o.boot <- rbind(o.boot,matrix(0,ncol=ncol(o.boot),nrow=7-nr))
+  nc <- ncol(o.boot)
+  if(nc < 7) o.boot <- cbind(o.boot,matrix(0,nrow=nrow(o.boot),ncol=7-nc))
+  o.boot = o.boot[opt(o.boot),]
+  
+  ## Build misclassification  matrix for two classes
+  high <- which(colnames(o.boot) %in% c("PR", "MF", "MS"))
+  hatPi <- matrix(data = c(sum(o.boot[-high,-high]),
+                                 sum(o.boot[-high,high]),
+                                 sum(o.boot[high,-high]),
+                                 sum(o.boot[high,high])),
+                        ncol = 2, nrow = 2, byrow = T)
+  
+  hatPi <- sweep(hatPi, MARGIN = 2, FUN="/", STATS=colSums(hatPi))
+  row.names(hatPi) <- colnames(hatPi) <- c("Low Risk", "High Risk")
+  
+  ## Fit naive model on bootstrap sample
+  cox.gmm.naive  <- coxph(OS~gmm.risk, model = TRUE, data = pdata[boot,])
+  
+  ## Fit simex
+  cox.gmm.simex <- mcsimex(cox.gmm.naive,
+                           SIMEXvariable = SIMEXvar,
+                           mc.matrix = smallXhatPi,
+                           asymptotic = FALSE)
+  return(cox.gmm.simex$coefficients)
+}
+```
+
+```{r sim_binom_func, echo = FALSE}
+## Function for binomial simulations with fuzzy
+simFuzzy <- function(pi0 = 5/10,      # Probability of 1. component
+                     mu0 = c(-1, 0),  # Mean parameter of feature 1
+                     mu1 = c(1, 0),   # Mean parameter of feature 2
+                     alpha = -1,      # 
+                     beta = 2,        #
+                     n = 1000,        # Number of samples
+                     method = "GMM"){ # Method for clustering GMM or Kmeans
+  
+  # Probability of 2. component
+  pi1 = 1 - pi0 
+  
+  # Results container
+  results <- rep(NA,16)
+  names(results) <- c("true.a", "true.a.std", "true.b", "true.b.std",
+                      "naive.a", "naive.a.std", "naive.b", "naive.b.std",
+                      "mcsimex.a", "mcsimex.a.std", "mcsimex.b", "mcsimex.b.std",
+                      "fuzzy.a", "fuzzy.a.std", "fuzzy.b", "fuzzy.b.std")
+  
+  # Training data, classes and features
+  class <- factor(sort(rbinom(n, size = 1, prob = pi1)+1))
+  feature <- rbind(rmvnorm(sum(class == 1), mu0),
+                   rmvnorm(sum(class == 2), mu1))
+  
+  # Outcome linearly regressed to class
+  outcome   <- rbinom(n, size = 1, 
+                      p = exp(alpha + 
+                                (beta)*(class==2))/(1+exp(alpha + (beta)*(class==2))))
+  
+  # Dataframe containing training data
+  train <- data.frame(id = 1:n, class = class, feature = feature, 
+                      outcome = outcome)
+  if(method == "GMM"){
+    # Fit Gaussian mixture model with two components
+    fit <- Mclust(train[,c("feature.1", "feature.2")], G = 2)
+    
+    # Classfication of training data
+    pred <- predict(fit)
+    reord <- order(fit$parameters$mean[1,])
+    train$predicted <- factor(pred$classification)
+    train$predicted <- relevel(factor(train$predicted, label = reord), "1")
+    
+    # Extract cluster probabilities as a fuzzy clustering
+    train$predFuzzy <- fit$z[,reord[2]]
+  }
+  
+  if(method == "Kmeans"){
+    # Fit K.means with two clusters
+    fit     <- kmeans(train[,c("feature.1", "feature.2")], 2)
+    
+    # Classification of training data
+    pred <- predict.kmeans(fit, newdata = train[,c("feature.1", "feature.2")],
+                           method = "classes")
+    reord <- order(fit$centers[,1])
+    train$predicted <- factor(pred)
+    train$predicted <- relevel(factor(train$predicted, label = reord), "1")
+    
+    # Fit fuzzy clustering 
+    #fitFuzz <- fanny(train[,c("feature.1", "feature.2")], 2)
+    #reord   <- order(tapply(fitFuzz$data[,1], fitFuzz$clustering, mean))
+    #train$predFuzzy <- fitFuzz$membership[,reord[2]]
+    
+    # Fit fuzzy clustering 
+    fitFuzz <- cmeans(train[,c("feature.1", "feature.2")], 2)
+    reord   <- order(fitFuzz$centers[,1])
+    train$predFuzzy <- fitFuzz$membership[,reord[2]]
+  }
+  
+  ## Check if predicted classes has two levels, if not return NA results
+  if(length(unique(train$predicted)) == 2){
+    res <- table(train$predicted, train$class)
+    
+    err <- 1-sum(diag(res))/sum(res)
+    
+    hatPi <- Pi(fit)
+    
+    dimnames(hatPi) <- list(levels(train$predicted), levels(train$class))
+    
+    ## Fit true classes
+    true <- glm(outcome ~ class, data = train, family = binomial, x = T, y = T)
+    results[c("true.a","true.b")] <- coefficients(true)
+    results[c("true.a.std","true.b.std")] <- sqrt(diag(vcov(true)))
+    
+    ## Fit naive model to mislabelled classes
+    naive <- glm(outcome ~ predicted, data = train, family = binomial, x = T, y =T)
+    results[c("naive.a","naive.b")] <- coefficients(naive)
+    results[c("naive.a.std","naive.b.std")] <- sqrt(diag(vcov(naive)))
+    
+    ## Simex correct naive model
+    fit.class <- try(mcsimex(naive, mc.matrix = hatPi, SIMEXvariable = "predicted"),
+                     silent = TRUE)
+    if(class(fit.class) == "mcsimex"){
+      results[c("mcsimex.a","mcsimex.b")] <- coefficients(fit.class)
+      results[c("mcsimex.a.std","mcsimex.b.std")] <- sqrt(diag(fit.class$variance.asymptotic))
+    }
+    
+    ## Fit model to fuzzy classes (use prob of class 2)
+    fit.fuzzy <- glm(outcome ~ predFuzzy, data = train, family = binomial, x = T, y =T)
+    results[c("fuzzy.a","fuzzy.b")] <- coefficients(fit.fuzzy)
+    results[c("fuzzy.a.std","fuzzy.b.std")] <- sqrt(diag(vcov(fit.fuzzy)))
+  }
+  return(results)
+}
+
+indFuzzy <- function(x){
+  res <- c(0,0,0,0)
+  if(x[1] >= x[2] & x[1] <= x[3]){
+    res[1] <- 1
+  } else{
+    res[1] <- 0
+  }
+  if(x[1] >= x[4] & x[1] <= x[5]){
+    res[2] <- 1
+  } else{
+    res[2] <- 0
+  }
+  if(is.na(x[6])){
+    res[3] <- NA
+  } else{
+    if (x[1] >= x[6] & x[1] <= x[7]) 
+      res[3] <- 1
+    else 
+      res[3] <- 0
+  }
+  if(is.na(x[8])){
+    res[4] <- NA
+  } else{
+    if (x[1] >= x[8] & x[1] <= x[9]) 
+      res[4] <- 1
+    else 
+      res[4] <- 0
+  }
+  return(res)
+}
+
+## Function to summarize results from binomial simulations
+summarizeResultsFuzzy <- function(results, alpha, beta, digits){
+  ## Bias
+  bias.a <- colMeans(results[,c("true.a", "naive.a", "mcsimex.a","fuzzy.a")] - alpha, na.rm = TRUE)
+  bias.b <- colMeans(results[,c("true.b", "naive.b", "mcsimex.b","fuzzy.b")] - beta, na.rm = TRUE)
+  ## MSE
+  mse.a <- colMeans((results[,c("true.a", "naive.a", "mcsimex.a","fuzzy.a")] - alpha)^2, na.rm = TRUE)
+  mse.b <- colMeans((results[,c("true.b", "naive.b", "mcsimex.b","fuzzy.b")] - beta)^2, na.rm = TRUE)
+  
+  meanNA <- function(x) mean(x, na.rm = T)
+  ## Coverage alpha
+  confint.a <- cbind(alpha,
+                     results[,c("true.a")]-1.96*results[,c("true.a.std")],
+                     results[,c("true.a")]+1.96*results[,c("true.a.std")],
+                     results[,c("naive.a")]-1.96*results[,c("naive.a.std")],
+                     results[,c("naive.a")]+1.96*results[,c("naive.a.std")],
+                     results[,c("mcsimex.a")]-1.96*results[,c("mcsimex.a.std")],
+                     results[,c("mcsimex.a")]+1.96*results[,c("mcsimex.a.std")],
+                     results[,c("fuzzy.a")]-1.96*results[,c("fuzzy.a.std")],
+                     results[,c("fuzzy.a")]+1.96*results[,c("fuzzy.a.std")])
+  coverage.a <- apply(t(apply(confint.a, 1, indFuzzy)), 2, meanNA)
+  
+  ## Coverage beta
+  confint.b <- cbind(beta,
+                     results[,c("true.b")]-1.96*results[,c("true.b.std")],
+                     results[,c("true.b")]+1.96*results[,c("true.b.std")],
+                     results[,c("naive.b")]-1.96*results[,c("naive.b.std")],
+                     results[,c("naive.b")]+1.96*results[,c("naive.b.std")],
+                     results[,c("mcsimex.b")]-1.96*results[,c("mcsimex.b.std")],
+                     results[,c("mcsimex.b")]+1.96*results[,c("mcsimex.b.std")],
+                     results[,c("fuzzy.b")]-1.96*results[,c("fuzzy.b.std")],
+                     results[,c("fuzzy.b")]+1.96*results[,c("fuzzy.b.std")])
+  coverage.b <- apply(t(apply(confint.b, 1, indFuzzy)), 2, meanNA)
+  
+  return(round(rbind(bias.a,bias.b,mse.a,mse.b,coverage.a,coverage.b), digits))
+}
+```
+
+```{r sim_cox_fun, echo = FALSE}
+## Function for cox simulations with fuzzy
+simFuzzyCox <- function(pi0 = 5/10,   # Probability of 1. component
+                     mu0  = c(-1, 0), # Mean parameter of feature 1
+                     mu1  = c(1, 0),  # Mean parameter of feature 2
+                     beta = 1,        #
+                     n = 1000,        # Number of samples
+                     method = "GMM"){ # Method for clustering GMM or Kmeans
+  
+  # Probability of 2. component
+  pi1 = 1 - pi0 
+  
+  
+  # Results container
+  results <- rep(NA,8)
+  names(results) <- c("true.b", "true.b.std",
+                      "naive.b", "naive.b.std",
+                      "mcsimex.b", "mcsimex.b.std",
+                      "fuzzy.b", "fuzzy.b.std")
+  
+  # Training data, classes and features
+  class <- factor(sort(rbinom(n, size = 1, prob = pi1)+1))
+  feature <- rbind(rmvnorm(sum(class == 1), mu0),
+                   rmvnorm(sum(class == 2), mu1))
+  
+  # Outcome linearly regressed to class
+  eventtime <- rexp(n, beta*(class == 2) + 1)
+  censtime <- rexp(n, 0.5)
+  time <- pmin(eventtime, censtime)
+  status <- eventtime < censtime
+  event <- status
+  
+  # Dataframe containing training data
+  train <- data.frame(id = 1:n, class = class, feature = feature,
+                      eventtime = eventtime, censtime = censtime, time = time, event = event, status = status)
+  train$surv <- Surv(train$time,train$status)
+  
+  
+  if(method == "GMM"){
+    # Fit Gaussian mixture model with two components
+    fit <- Mclust(train[,c("feature.1", "feature.2")], G = 2)
+    
+    # Classfication of training data
+    pred <- predict(fit)
+    reord <- order(fit$parameters$mean[1,])
+    train$predicted <- factor(pred$classification)
+    train$predicted <- relevel(factor(train$predicted, label = reord), "1")
+    
+    # Extract cluster probabilities as a fuzzy clustering
+    train$predFuzzy <- fit$z[,reord[2]]
+  }
+  
+  if(method == "Kmeans"){
+    # Fit K.means with two clusters
+    fit     <- kmeans(train[,c("feature.1", "feature.2")], 2)
+    
+    # Classification of training data
+    pred <- predict.kmeans(fit, newdata = train[,c("feature.1", "feature.2")],
+                           method = "classes")
+    reord <- order(fit$centers[,1])
+    train$predicted <- factor(pred)
+    train$predicted <- relevel(factor(train$predicted, label = reord), "1")
+    
+    # Fit fuzzy clustering 
+    fitFuzz <- cmeans(train[,c("feature.1", "feature.2")], 2)
+    reord   <- order(fitFuzz$centers[,1])
+    train$predFuzzy <- fitFuzz$membership[,reord[2]]
+  }
+  
+  ## Check if predicted classes has two levels, if not return NA results
+  if(length(unique(train$predicted)) == 2){
+    res <- table(train$predicted, train$class)
+    err <- 1-sum(diag(res))/sum(res)
+    hatPi <- Pi(fit)
+    dimnames(hatPi) <- list(levels(train$predicted), levels(train$class))
+    
+    ## Fit true classes
+    true  <- coxph(surv ~ class, data  = train)
+    results[c("true.b")] <- coefficients(true)
+    results[c("true.b.std")] <- sqrt(diag(vcov(true)))
+    
+    ## Fit naive model to mislabelled classes
+    naive  <- coxph(surv ~ predicted, data  = train, model = T)
+    results[c("naive.b")] <- coefficients(naive)
+    results[c("naive.b.std")] <- sqrt(diag(vcov(naive)))
+    
+    
+    ## Simex correct naive model
+    fit.class <- try(mcsimex(naive, mc.matrix = hatPi,
+                             SIMEXvariable = "predicted",
+                             asymptotic = FALSE),
+                     silent = TRUE)
+    if(class(fit.class) == "mcsimex"){
+      results[c("mcsimex.b")] <- coefficients(fit.class)
+      results[c("mcsimex.b.std")] <- sqrt(diag(fit.class$variance.jackknife))
+    }
+    
+    ## Fit model to fuzzy classes (use prob of class 2)
+    fit.fuzzy  <- coxph(surv ~ predFuzzy, data  = train)
+    results[c("fuzzy.b")] <- coefficients(fit.fuzzy)
+    results[c("fuzzy.b.std")] <- sqrt(diag(vcov(fit.fuzzy)))
+  }
+  return(results)
+}
+
+## Function to summarize results from Cox simulations
+summarizeResultsFuzzyCox <- function(results, trueHR, digits){
+  ## Bias
+  bias.b <- colMeans(exp(results[,c("true.b", "naive.b", "mcsimex.b","fuzzy.b")]) - trueHR, na.rm = TRUE)
+  
+  ## MSE
+  mse.b <- colMeans((exp(results[,c("true.b", "naive.b", "mcsimex.b","fuzzy.b")]) - trueHR)^2, na.rm = TRUE)
+  
+  meanNA <- function(x) mean(x, na.rm = T)
+  ## Coverage 
+  confint.b <- cbind(log(trueHR),
+                     results[,c("true.b")]-1.96*results[,c("true.b.std")],
+                     results[,c("true.b")]+1.96*results[,c("true.b.std")],
+                     results[,c("naive.b")]-1.96*results[,c("naive.b.std")],
+                     results[,c("naive.b")]+1.96*results[,c("naive.b.std")],
+                     results[,c("mcsimex.b")]-1.96*results[,c("mcsimex.b.std")],
+                     results[,c("mcsimex.b")]+1.96*results[,c("mcsimex.b.std")],
+                     results[,c("fuzzy.b")]-1.96*results[,c("fuzzy.b.std")],
+                     results[,c("fuzzy.b")]+1.96*results[,c("fuzzy.b.std")])
+  coverage.b <- apply(t(apply(confint.b, 1, indFuzzy)), 2, meanNA)
+  
+  return(round(rbind(bias.b,mse.b,coverage.b), digits))
+}
+```
+
+
+# Simulation with logistic regression
+We generate $n = 1000$ independent training data pairs from a Gaussian mixture model, where the prior probabilities of classes 0 and 1 are $\pi_0 = 5/10$ and $\pi_1 = 5/10$ respectively; class 0 and 1 observations have bivariate normal distributions with means $\mu_0=(-1, 0)$ and $\mu_1=(1, 0)$ respectively, and common identity covariance matrix. The outcome is modelled by logistic regression with linear predictor $\alpha + \beta *\mbox{class}$, where $\alpha=-1$ and $\beta=2$.  
+
+```{r GMM}
+# Graphical parameters for this chunck
+par(pty = "s")
+
+# Set seed for reproducibility purposes
+set.seed(2000)
+
+# Model parameters
+pi0 <- 5/10     # Probabiliyt of 1. component
+pi1 <- 1 - pi0  # Probability of 2. component
+mu0 <- c(-1, 0) # Mean parameter of feature 1
+mu1 <- c(1, 0)  # Mean parameter of feature 2
+alpha <- -1     # 
+beta <- 2       #
+
+# Number of samples in each simluation
+n <- 1000
+
+# Simulation and plot of a typical case
+class <- factor(sort(rbinom( n = n, size = 1, prob = pi1)+1))
+feature <- rbind(rmvnorm(sum(class == 1), mu0),
+                 rmvnorm(sum(class == 2), mu1))
+
+# Set plot colours
+ccol = ifelse(class == 1, "red", "black")
+
+plot(feature[, 1], feature[, 2], col = ccol, pch = 16, 
+     xlim = c(-3, 3), ylim = c(-3, 3), xlab = "Feature 1", ylab = "Feature 2")
+
+```
+
+Obviously, a number of observations will be mis-classfied, so by simulation we investigate the performace of the MC-SIMEX procedure. First we plot a figure showing the principle behind the SIMEX procedure:
+```{r simex_fig}
+# Simulate data with 20% misclassification
+set.seed(1008)
+X1 <- rbinom(100, size = 1, p = 0.5) +1
+X2 <- 2*rbinom(100, size = 1, p = 0.2) + X1
+X2 <- case_when(X2 == 1 ~ 1,
+                X2 == 2 ~ 2,
+                X2 == 3 ~ 2,
+                X2 == 4 ~ 1)
+
+# Simulate outcome based on true classes
+outcome   <- rbinom(100, size = 1, 
+                    p = exp(2*(X1==2))/(1+exp(2*(X1==2))))
+
+# Create dataframe and misclassification matrix
+train <- data.frame(id = 1:100,
+                    "X1" = factor(X1),
+                    "X2" = factor(X2),
+                    outcome)
+hatPi <- matrix(c(0.8,0.2,0.2,0.8), ncol =2, byrow = T)
+dimnames(hatPi) <- list(levels(train$X1), levels(train$X1))
+
+# Fit Naive model
+naive <- glm(outcome ~ X2, data = train, family = binomial, x = T, y =T)
+
+# Simex correct for misclassification
+fit.class <- mcsimex(naive, mc.matrix = hatPi, SIMEXvariable = "X2")
+
+# Extract data for plot
+plotEst    <- data.frame(fit.class$SIMEX.estimates)
+plotPoints <- data.frame("lambda"    = rep(fit.class$lambda[-1], each = 100),
+                         "Bootstrap" = unlist(fit.class$theta$X22))
+lambda     <- seq(-1,max(plotEst$lambda), by = 0.01)
+plotLine   <- data.frame(lambda,
+                         (predict(fit.class$extrapolation, newdata = data.frame(lambda))))
+
+# Plot SIMEX figure                     
+simex.plot <- ggplot(plotPoints, aes(x = lambda + 1, y = Bootstrap)) +
+  geom_point(col = "grey") +
+  geom_point(data = subset(plotEst, lambda>=0), aes(x = lambda + 1, y = X22), size = 3) +
+  geom_point(data = subset(plotEst, lambda<0), aes(x = lambda + 1, y = X22), size = 3, pch = 1) +
+  geom_line(data = subset(plotLine, lambda > 0), aes(x = lambda + 1, y = X22)) +
+  geom_line(data = subset(plotLine, lambda < 0), aes(x = lambda + 1, y = X22), linetype = "dashed") +
+  annotate("text", x = plotEst$lambda[1]+1.4, y = plotEst$X22[1], label = "mcsimex estimate") +
+  annotate("text", x = plotEst$lambda[2]+1.4, y = plotEst$X22[2], label = "naïve estimate") +
+  theme_bw() +
+  ylab(expression(beta)) +
+  theme(axis.text.y = element_text(angle = 90)) +
+  xlab(expression(lambda + 1))
+simex.plot
+```
+
+A range of scenarios similar to the one described above was tested by varying both the number of training data pairs $n = (200, 500, 1000)$ and the class probability $\pi_0 = (0.2, 0.5)$ . We performed unsupervised clustering with GMM and Kmeans.
+```{r sim_binom}
+# Number of simulated experiments
+nSim    <- 1000
+nSample <- c(200, 500, 1000)
+probs   <- c(0.2, 0.5)
+method  <- c("GMM", "Kmeans")
+
+if(!file.exists("GeneratedData/sim_results_binom_fuzzy.RData")){
+  # list for results
+  simResults <- list()
+  parPackages <- c("simex", "mixtools", "mclust", "arrangements","e1071") #,"cluster"
+  
+  # Set up parallel computations
+  registerDoParallel(cores = 20)
+  registerDoRNG(seed = 123)
+  
+  for(meth in method){
+    for(classProb in probs){
+      for(sampleSize in nSample){
+        simResults[[paste(meth)]][[paste(classProb)]][[paste(sampleSize)]] <-
+          foreach(i=1:nSim,
+                  .combine = "rbind",
+                  .errorhandling = "pass",
+                  .packages = parPackages) %dopar% {
+                    simFuzzy(n   = sampleSize,
+                             pi0 = classProb,
+                             alpha = alpha,
+                             beta = beta,
+                             mu0 = mu0,
+                             mu1 = mu1,
+                             method = meth)
+                  }
+      }
+    }
+  }
+  save(simResults, file = "GeneratedData/sim_results_binom_fuzzy.RData")
+  stopImplicitCluster()
+}
+```
+
+Summarize the result of the 1000 simulations. We see clearly an attenuation under mislabeling, and considerable improvement under the MC-SIMEX approach.
+```{r print_binom}
+load("GeneratedData/sim_results_binom_fuzzy.RData")
+
+## Summarize results
+summarizeResultsList <- function(x) summarizeResultsFuzzy(x, alpha = alpha, beta = beta, digits = 2)
+rs <- lapply(simResults, function(x) lapply(x, function(x) lapply(x, summarizeResultsList)))
+
+balanced <- cbind(rep(names(rs$GMM$`0.5`), each = 6),
+                      do.call(rbind, rs$GMM$`0.5`),
+                      do.call(rbind, rs$Kmeans$`0.5`))
+unbalanced <- cbind(rep(names(rs$GMM$`0.2`), each = 6),
+                      do.call(rbind, rs$GMM$`0.2`),
+                      do.call(rbind, rs$Kmeans$`0.2`))
+
+kable(balanced[,-6], 
+      col.names = c("nSample", "GMM True", "GMM Naive", "GMM Simex","GMM Fuzzy",
+                    "KM Naive", "KM Simex", "KM Fuzzy"),
+      caption = "Binomial simulation results with balanced classes")
+kable(unbalanced[,-6], 
+      col.names = c("nSample", "GMM True", "GMM Naive", "GMM Simex","GMM Fuzzy",
+                    "KM Naive", "KM Simex", "KM Fuzzy"),
+      caption = "Binomial simulation results with unbalanced classes")
+
+```
+
+
+```{r dump_binom, echo = FALSE, warning = FALSE}
+## Create Latex tables
+tBal <- Hmisc::latex(balanced[-c(3,4,9,10,15,16),-c(1,6)],
+             title = "",
+             cgroup = c("","GMM", "Kmeans"),
+             n.cgroup = c(1,3,3),
+             rgroup = c(200,500,1000),
+             n.rgroup = c(4,4,4),
+             file = "Output/Tables/balancedFuzzy.tex",
+             colheads = c("True",rep(c("Naive","Simex","Fuzzy"),2)),
+             caption = "Results from balanced simulations with logistic regression",
+             label = "simResults:balanced"
+             )
+tUbal <- Hmisc::latex(unbalanced[-c(3,4,9,10,15,16),-c(1,6)],
+             title = "",
+             cgroup = c("","GMM", "Kmeans"),
+             n.cgroup = c(1,3,3),
+             rgroup = c(200,500,1000),
+             n.rgroup = c(4,4,4),
+             file = "Output/Tables/unbalancedFuzzy.tex",
+             colheads = c("True",rep(c("Naive","Simex","Fuzzy"),2)),
+             caption = "Results from unbalanced simulations with logistic regression",
+             label = "simResults:unbalanced"
+             )
+
+```
+
+## Simulations for survival data
+```{r sim_cox}
+# Number of simulated experiments
+nSim    <- 1000
+nSample <- c(200, 500, 1000)
+probs   <- c(0.2, 0.5)
+method  <- c("GMM", "Kmeans")
+
+if(!file.exists("GeneratedData/sim_results_cox_fuzzy.RData")){
+  # list for results
+  simResults <- list()
+  parPackages <- c("simex", "mixtools", "mclust", "arrangements","e1071","survival")
+  
+  # Set up parallel computations
+  registerDoParallel(cores = 20)
+  registerDoRNG(seed = 123)
+  
+  for(meth in method){
+    for(classProb in probs){
+      for(sampleSize in nSample){
+        simResultsCox[[paste(meth)]][[paste(classProb)]][[paste(sampleSize)]] <-
+          foreach(i=1:nSim,
+                  .combine = "rbind",
+                  .errorhandling = "pass",
+                  .packages = parPackages) %dopar% {
+                    simFuzzyCox(n   = sampleSize,
+                                pi0 = classProb,
+                                mu0 = mu0,
+                                mu1 = mu1,
+                                method = meth)
+                  }
+      }
+    }
+  }
+  save(simResultsCox, file = "GeneratedData/sim_results_cox_fuzzy.RData")
+  stopImplicitCluster()
+}
+```
+
+```{r print_cox}
+load("GeneratedData/sim_results_cox_fuzzy.RData")
+
+## Summarize results
+summarizeResultsList <- function(x) summarizeResultsFuzzyCox(x, trueHR = 2, digits = 2)
+rs <- lapply(simResultsCox, function(x) lapply(x, function(x) lapply(x, summarizeResultsList)))
+
+balanced <- cbind(rep(names(rs$GMM$`0.5`), each = 3),
+                      do.call(rbind, rs$GMM$`0.5`),
+                      do.call(rbind, rs$Kmeans$`0.5`))
+unbalanced <- cbind(rep(names(rs$GMM$`0.2`), each = 3),
+                      do.call(rbind, rs$GMM$`0.2`),
+                      do.call(rbind, rs$Kmeans$`0.2`))
+
+kable(balanced[,-6], 
+      col.names = c("nSample", "GMM True", "GMM Naive", "GMM Simex","GMM Fuzzy",
+                    "KM Naive", "KM Simex", "KM Fuzzy"),
+      caption = "Cox simulation results with balanced classes")
+kable(unbalanced[,-6], 
+      col.names = c("nSample", "GMM True", "GMM Naive", "GMM Simex","GMM Fuzzy",
+                    "KM Naive", "KM Simex", "KM Fuzzy"),
+      caption = "Cox simulation results with unbalanced classes")
+
+```
+
+```{r dump_cox, echo = FALSE, warning = FALSE}
+## Create Latex tables
+tBal <- Hmisc::latex(balanced[-c(2,5,8),-c(1,6)],
+             title = "",
+             cgroup = c("","GMM", "Kmeans"),
+             n.cgroup = c(1,3,3),
+             rgroup = c(200,500,1000),
+             n.rgroup = c(2,2,2),
+             file = "Output/Tables/balancedFuzzyCox.tex",
+             colheads = c("True",rep(c("Naive","Simex","Fuzzy"),2)),
+             caption = "Results from balanced simulations with Cox regression",
+             label = "simResults:balanced"
+             )
+tUbal <- Hmisc::latex(unbalanced[-c(2,5,8),-c(1,6)],
+             title = "",
+             cgroup = c("","GMM", "Kmeans"),
+             n.cgroup = c(1,3,3),
+             rgroup = c(200,500,1000),
+             n.rgroup = c(2,2,2),
+             file = "Output/Tables/unbalancedFuzzyCox.tex",
+             colheads = c("True",rep(c("Naive","Simex","Fuzzy"),2)),
+             caption = "Results from unbalanced simulations with Cox regression",
+             label = "simResults:unbalanced"
+             )
+
+```
