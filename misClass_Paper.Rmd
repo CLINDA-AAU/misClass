@@ -4,8 +4,8 @@ title: Regression modelling based on imperfect labels arising from unsupervised 
 author: "Rasmus Brøndum, Thomas Yssing Michalsen & Martin Bøgsted"
 date: "20 11 2019"
 output:
-  html_document: default
   pdf_document: default
+  html_document: default
 ---
 ```{r setup, include=FALSE, echo = FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -439,7 +439,7 @@ X2 <- case_when(X2 == 1 ~ 1,
 
 # Simulate outcome based on true classes
 outcome   <- rbinom(100, size = 1, 
-                    p = exp(-1 + 2*(X1==2))/(1+exp(-1 + 2*(X1==2))))
+                    p = exp(2*(X1==2))/(1+exp(2*(X1==2))))
 
 # Create dataframe and misclassification matrix
 train <- data.frame(id = 1:100,
@@ -470,8 +470,8 @@ simex.plot <- ggplot(plotPoints, aes(x = lambda + 1, y = Bootstrap)) +
   geom_point(data = subset(plotEst, lambda<0), aes(x = lambda + 1, y = X22), size = 3, pch = 1) +
   geom_line(data = subset(plotLine, lambda > 0), aes(x = lambda + 1, y = X22)) +
   geom_line(data = subset(plotLine, lambda < 0), aes(x = lambda + 1, y = X22), linetype = "dashed") +
-  annotate("text", x = plotEst$lambda[1]+1.4, y = plotEst$X22[1], label = "MCSIMEX estimate") +
-  annotate("text", x = plotEst$lambda[2]+1.4, y = plotEst$X22[2], label = "Naïve estimate") +
+  annotate("text", x = plotEst$lambda[1]+1.4, y = plotEst$X22[1], label = "mcsimex estimate") +
+  annotate("text", x = plotEst$lambda[2]+1.4, y = plotEst$X22[2], label = "naïve estimate") +
   theme_bw() +
   ylab(expression(beta)) +
   theme(axis.text.y = element_text(angle = 90)) +
