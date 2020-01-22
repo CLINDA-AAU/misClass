@@ -1221,7 +1221,7 @@ if(!file.exists(bootsFile)){
   registerDoParallel(cores = 30)
   registerDoRNG(seed = 321)
   
-  r.boot <- foreach(i=1:1000, .combine = "+")  %dopar% {
+  r.boot <- foreach(i=1:1000)  %dopar% {
     bootConf(n.boot = n.boot,
              data = t(exprs(zhan_proc[,zhan_proc$regime == "TT2"])),
              orig.class = ct,
@@ -1231,7 +1231,9 @@ if(!file.exists(bootsFile)){
   stopImplicitCluster()
 } else load(bootsFile)
 
+
 ## Build hatPi matrix from bootstraps
+r.boot <- Reduce("+", r.boot)
 hatPi <- sweep(r.boot, MARGIN = 2, FUN="/", STATS=colSums(r.boot))
 rownames(hatPi) <- colnames(hatPi) #Only rename rows, columns are original classes and seem okay
 xhatPi <- build.mc.matrix(as.matrix(hatPi))
